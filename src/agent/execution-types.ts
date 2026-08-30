@@ -6,6 +6,8 @@ import type {
   SkillSelection,
 } from "./skills/types.js";
 import type { RobloxStudioContext } from "./studio-context.js";
+import type { EnvironmentLayout } from "./placement/types.js";
+import type { SecurityArtifact, SecurityReview } from "./security/types.js";
 
 export type AgentPhase =
   | "understand"
@@ -80,11 +82,24 @@ export interface AgentPlan {
   selectedSkills?: SkillSelection;
 
   /**
+   * Determineistic, authoritative placement layout resolved by the
+   * placement engine for this task. Every element the build phase
+   * creates must land exactly on its resolved service/folder/class.
+   */
+  placement?: EnvironmentLayout;
+
+  /**
    * True when the request is the refinement/hardening family ("خليها
    * أحلى" / "make it better" / "عدّل"). The plan prompts the model to
    * modify the existing artifact in place, never to create a duplicate.
    */
   refinementMode?: boolean;
+
+  /**
+   * Deterministic security & server-authority directive rendered from
+   * the resolved placements (injected into the system + verify prompts).
+   */
+  securityDirective?: string;
 }
 
 export interface ToolExecution {
@@ -152,4 +167,18 @@ export interface AgentExecutionState {
   verification: VerificationState;
   errors: AgentError[];
   finalContent: string;
+
+  /**
+   * Deterministic security review of artifacts created/modified during
+   * this task. Populated as build/run tools succeed; feeds the
+   * verification prompt + the security gate.
+   */
+  securityFindings?: SecurityReview;
+
+  /**
+   * Raw artifacts (path/class/source) captured from successful build and
+   * execution calls this task, keyed once per path. securityFindings is
+   * recomputed from this list whenever it grows.
+   */
+  securityArtifacts?: SecurityArtifact[];
 }

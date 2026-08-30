@@ -69,6 +69,26 @@ import {
   VERIFICATION_USER_PROMPT,
   buildVerificationPrompt,
 } from "./agent/verify-prompt.js";
+import {
+  applyPlacementHints,
+  buildLayout,
+} from "./agent/placement/rules.js";
+import {
+  buildSecurityDirectiveLines,
+  renderSecurityDirective,
+} from "./agent/security/directive.js";
+import {
+  buildSecurityReview,
+  evaluateSecurityGate,
+  renderBlockingFindingsSection,
+} from "./agent/security/analyze.js";
+import type { SecurityArtifact, SecurityReview } from "./agent/security/types.js";
+import type { EnvironmentLayout } from "./agent/placement/types.js";
+import {
+  jsonByteSize as measureJsonBytes,
+  PerfCollector,
+  renderPerfReport,
+} from "./agent/perf.js";
 
 import {
   buildMemoryPrompt,
@@ -262,6 +282,20 @@ interface AgentPlan {
    * never create a duplicate.
    */
   refinementMode?: boolean;
+
+  /**
+   * Deterministic placement layout from the placement engine. Every
+   * element the build phase creates must land exactly on its resolved
+   * service/folder/class (injected into the system + verify prompts).
+   */
+  placement?: EnvironmentLayout;
+
+  /**
+   * Deterministic security & server-authority directive derived from the
+   * resolved placements (injected into the system prompt + verification
+   * prompt). Rendered by ./agent/security/directive.ts.
+   */
+  securityDirective?: string;
 }
 
 /* ============================================================================
@@ -386,6 +420,19 @@ interface AgentState {
    * mistakes across sessions.
    */
   memoryRecall?: MemoryRecallResult;
+
+  /**
+   * Deterministic security review of artifacts created/modified this
+   * task (recomputed from securityArtifacts as build calls succeed).
+   * Feeds the verification prompt + the evidence-based security gate.
+   */
+  securityFindings?: SecurityReview;
+
+  /**
+   * Raw artifacts (path/class/source) captured from successful build and
+   * execution calls this task, keyed once per path.
+   */
+  securityArtifacts?: SecurityArtifact[];
 }
 
 /* ============================================================================
@@ -406,6 +453,8 @@ export class Agent {
   ) => void;
 
   private streamingEnabled = false;
+
+  private perf?: PerfCollector;
 
   constructor(
     router: ModelRouter,
@@ -456,6 +505,14 @@ export class Agent {
     const plan = this.createInitialPlan(message);
 
     task.capability = plan.capability;
+
+    this.perf =
+      process.env.PERF_LOGGING === "1"
+        ? new PerfCollector(
+            task.id,
+            plan.capability,
+          )
+        : undefined;
 
     this.streamingEnabled =
       plan.capability === "chat" &&
@@ -525,11 +582,17 @@ export class Agent {
      */
     if (this.memory) {
       try {
+        const recallStartedAt = Date.now();
+
         state.memoryRecall = await this.memory.recall(message, {
           boostTypes: state.plan.needsRoblox
             ? ["artifact", "fact", "project-state"]
             : undefined,
         });
+
+        this.perf?.markMemoryRecall(
+          Date.now() - recallStartedAt,
+        );
 
         for (const preference of detectUserPreferences(message)) {
           await this.memory.remember(preference);
@@ -579,8 +642,14 @@ export class Agent {
       );
 
     if (needsActiveStudio) {
+      const bootstrapStartedAt = Date.now();
+
       await this.ensureRobloxStudioContext(
         state,
+      );
+
+      this.perf?.markStudioBootstrap(
+        Date.now() - bootstrapStartedAt,
       );
 
       this.printStudioContext(state);
@@ -1002,6 +1071,17 @@ Continue until the user's requested outcome is actually achieved and verifiable.
 
     await this.captureMemory(state);
 
+    if (this.perf) {
+      const report = this.perf.finish(
+        state.iterations,
+        state.totalToolCalls,
+      );
+
+      console.log(
+        renderPerfReport(report),
+      );
+    }
+
     return {
   taskId: task.id,
   content: state.finalContent,
@@ -1324,13 +1404,25 @@ Continue until the user's requested outcome is actually achieved and verifiable.
     normalized: Record<string, unknown>;
     studioIdInjected: boolean;
   } {
+    const hinted = applyPlacementHints(
+      toolName,
+      args,
+      state.plan.placement,
+    );
+
+    if (hinted.applied.length > 0) {
+      console.log(
+        `[placement] ${toolName}: auto-filled ${hinted.applied.join(", ")} from placement`,
+      );
+    }
+
     if (
       state.studioContext.status !==
         "resolved" ||
       !state.studioContext.studioId
     ) {
       return {
-        normalized: args,
+        normalized: hinted.normalized,
         studioIdInjected: false,
       };
     }
@@ -1340,7 +1432,7 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       this.findStudioDiscoveryToolName()
     ) {
       return {
-        normalized: args,
+        normalized: hinted.normalized,
         studioIdInjected: false,
       };
     }
@@ -1353,7 +1445,7 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       !group.startsWith("roblox")
     ) {
       return {
-        normalized: args,
+        normalized: hinted.normalized,
         studioIdInjected: false,
       };
     }
@@ -1384,7 +1476,7 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       );
 
     return normalizeRobloxToolArguments(
-      args,
+      hinted.normalized,
       studioIdKey,
       state.studioContext.studioId,
     );
@@ -1397,7 +1489,42 @@ Continue until the user's requested outcome is actually achieved and verifiable.
 private createInitialPlan(
     message: string,
   ): AgentPlan {
-    return buildPlan(message);
+    const plan = buildPlan(message);
+
+    plan.placement = buildLayout({
+      objective:
+        plan.objective,
+
+      intent:
+        plan.intent,
+
+      domain:
+        plan.semanticRequest
+          ?.domain,
+
+      needsRoblox:
+        plan.needsRoblox,
+
+      requiresBuild:
+        plan.requiresBuild,
+    });
+
+    plan.securityDirective =
+      renderSecurityDirective(
+        buildSecurityDirectiveLines(
+          plan.placement?.placements ??
+            [],
+          {
+            needsRoblox:
+              plan.needsRoblox,
+
+            requiresBuild:
+              plan.requiresBuild,
+          },
+        ),
+      );
+
+    return plan;
   }
 
   private isStudioDiscoveryOnlyRequest(
@@ -1522,7 +1649,9 @@ private createInitialPlan(
         phaseInstruction,
       );
 
-    return provider.chat({
+    const startedAt = Date.now();
+
+    const response = await provider.chat({
       model,
 
       messages: modelMessages,
@@ -1546,6 +1675,28 @@ private createInitialPlan(
           ? tools
           : undefined,
     });
+
+    this.perf?.recordChat(
+      {
+        phase,
+
+        step: "main-loop",
+
+        model,
+
+        contextLength,
+
+        toolCount: tools.length,
+
+        toolDefBytes:
+          measureJsonBytes(tools),
+      },
+      modelMessages,
+      response,
+      Date.now() - startedAt,
+    );
+
+    return response;
   }
 
   private injectPhaseInstruction(
@@ -1628,6 +1779,8 @@ private createInitialPlan(
           sort: true,
 
           maxTools: 64,
+
+          compactDescriptions: true,
         },
       );
 
@@ -1947,6 +2100,12 @@ private createInitialPlan(
         result.success
       ) {
         state.consecutiveFailures = 0;
+
+        this.captureSecurityArtifacts(
+          state,
+          name,
+          attempt.executedInput,
+        );
       } else {
         state.consecutiveFailures++;
 
@@ -2146,6 +2305,148 @@ Switch to diagnosis:
     };
   }
 
+  /**
+   * Deterministic security capture: after a successful build/execute call,
+   * the involved artifacts are accumulated (once per path) and the
+   * security review is recomputed. Findings then feed the verification
+   * prompt + the evidence-based security gate.
+   */
+  private captureSecurityArtifacts(
+    state: AgentState,
+    name: string,
+    executedInput: Record<string, unknown>,
+  ): void {
+    const artifacts =
+      this.extractSecurityArtifacts(
+        name,
+        executedInput,
+      );
+
+    if (
+      artifacts.length === 0
+    ) {
+      return;
+    }
+
+    const accumulated = new Map(
+      (state.securityArtifacts ??
+        []
+      ).map((artifact) => [
+        artifact.path,
+        artifact,
+      ]),
+    );
+
+    for (const artifact of artifacts) {
+      accumulated.set(
+        artifact.path,
+        artifact,
+      );
+    }
+
+    state.securityArtifacts = [
+      ...accumulated.values(),
+    ];
+
+    state.securityFindings =
+      buildSecurityReview(
+        state.securityArtifacts,
+      );
+
+    if (
+      state.securityFindings.findings
+        .length > 0
+    ) {
+      console.log(
+        `[security] ${name}: ${state.securityFindings.rendered}`,
+      );
+    }
+  }
+
+  private extractSecurityArtifacts(
+    name: string,
+    executedInput: Record<string, unknown>,
+  ): SecurityArtifact[] {
+    if (
+      name !==
+        "roblox_multi_edit" &&
+      name !==
+        "roblox_execute_luau"
+    ) {
+      return [];
+    }
+
+    const filePath =
+      executedInput.file_path;
+
+    if (
+      typeof filePath !==
+        "string" ||
+      filePath.length === 0
+    ) {
+      return [];
+    }
+
+    const className =
+      name ===
+      "roblox_multi_edit"
+        ? typeof executedInput.className ===
+          "string"
+          ? executedInput.className
+          : "Script"
+        : "Script";
+
+    let source = "";
+
+    if (
+      name ===
+      "roblox_multi_edit"
+    ) {
+      const edits = Array.isArray(
+        executedInput.edits,
+      )
+        ? (
+            executedInput.edits as Array<{
+              new_string?: unknown;
+            }>
+          )
+        : [];
+
+      source = edits
+        .map((edit) =>
+          typeof edit.new_string ===
+          "string"
+            ? edit.new_string
+            : "",
+        )
+        .join("\n");
+    } else {
+      source =
+        typeof executedInput.source ===
+        "string"
+          ? executedInput.source
+          : typeof executedInput.code ===
+              "string"
+            ? executedInput.code
+            : "";
+    }
+
+    if (
+      source.trim().length ===
+      0
+    ) {
+      return [];
+    }
+
+    return [
+      {
+        path: filePath,
+        className,
+        source,
+      },
+    ];
+  }
+
   private recordToolFailure(
     state: AgentState,
     executionId: string,
@@ -2235,6 +2536,8 @@ Switch to diagnosis:
           sort: true,
 
           maxTools: 40,
+
+          compactDescriptions: true,
         },
       );
 
@@ -2335,6 +2638,17 @@ Switch to diagnosis:
                       )
                       .join("\n")
                   : "(no successful tool calls yet)",
+
+              expectedLayoutInstruction:
+                state.plan.placement
+                  ?.instruction,
+
+              securitySection:
+                state.securityFindings
+                  ? renderBlockingFindingsSection(
+                      state.securityFindings,
+                    )
+                  : undefined,
             }),
         },
 
@@ -2345,6 +2659,8 @@ Switch to diagnosis:
             VERIFICATION_USER_PROMPT,
         },
       ];
+
+    const verifyStartedAt = Date.now();
 
     const firstResponse =
       await provider.chat({
@@ -2362,6 +2678,29 @@ Switch to diagnosis:
         tools:
           verificationTools,
       });
+
+    this.perf?.recordChat(
+      {
+        phase: "verify",
+
+        step: "verify",
+
+        model,
+
+        contextLength,
+
+        toolCount:
+          verificationTools.length,
+
+        toolDefBytes:
+          measureJsonBytes(
+            verificationTools,
+          ),
+      },
+      verificationMessages,
+      firstResponse,
+      Date.now() - verifyStartedAt,
+    );
 
     const firstMessage =
       firstResponse.message;
@@ -2391,6 +2730,13 @@ Switch to diagnosis:
           (execution) =>
             execution.name,
         );
+
+    /*
+     * Real inspected Sources collected during verification. These are the
+     * strongest evidence for the security gate: an artifact is only
+     * cleared when its LIVE inspected Source no longer triggers the rule.
+     */
+    const verifiedSources: SecurityArtifact[] = [];
 
     for (
       const toolCall of calls
@@ -2441,6 +2787,17 @@ Switch to diagnosis:
         evidence.push(
           `${toolName}: ${this.summarizeEvidence(result.data)}`,
         );
+
+        const inspectedSource =
+          this.extractInspectedSource(
+            result.data,
+          );
+
+        if (inspectedSource) {
+          verifiedSources.push(
+            inspectedSource,
+          );
+        }
 
         state.executedTools.push({
           id: crypto.randomUUID(),
@@ -2494,6 +2851,8 @@ Switch to diagnosis:
     if (
       calls.length > 0
     ) {
+      const finalStartedAt = Date.now();
+
       finalResponse =
         await provider.chat({
           model,
@@ -2510,6 +2869,29 @@ Switch to diagnosis:
           tools:
             verificationTools,
         });
+
+      this.perf?.recordChat(
+        {
+          phase: "verify",
+
+          step: "verify",
+
+          model,
+
+          contextLength,
+
+          toolCount:
+            verificationTools.length,
+
+          toolDefBytes:
+            measureJsonBytes(
+              verificationTools,
+            ),
+        },
+        verificationMessages,
+        finalResponse,
+        Date.now() - finalStartedAt,
+      );
     }
 
     const finalContent =
@@ -2555,29 +2937,108 @@ Switch to diagnosis:
             evidence,
           ));
 
+    const securityGate =
+      state.securityFindings
+        ? evaluateSecurityGate(
+            state.securityFindings,
+            verifiedSources,
+          )
+        : null;
+
+    const gateUnresolved =
+      securityGate !== null &&
+      !securityGate.satisfied;
+
+    const gatePassed =
+      !gateUnresolved;
+
     const reason = postBuildMissing
       ? "VERIFICATION_FAILED: A successful create/execute is not enough. Inspect Studio after the change and confirm the requested object exists."
-      : passed
-        ? "All required completion criteria have concrete supporting evidence."
-        : missingCriteria.length > 0
-          ? `VERIFICATION_FAILED: Missing or unproven criteria: ${missingCriteria
-              .map((criterion) => criterion.id)
-              .join(", ")}`
-          : finalContent ||
-            "VERIFICATION_FAILED: Verification did not produce sufficient evidence.";
+      : gateUnresolved
+        ? `VERIFICATION_FAILED: unresolved HIGH server-authority defects (inspect the current Source and fix before completion): ${securityGate?.unresolved
+            .map(
+              (finding) =>
+                `${finding.code} ${finding.path}`,
+            )
+            .join(", ")}`
+        : passed
+          ? "All required completion criteria have concrete supporting evidence."
+          : missingCriteria.length > 0
+            ? `VERIFICATION_FAILED: Missing or unproven criteria: ${missingCriteria
+                .map((criterion) => criterion.id)
+                .join(", ")}`
+            : finalContent ||
+              "VERIFICATION_FAILED: Verification did not produce sufficient evidence.";
 
     return {
       required: true,
 
       attempted: true,
 
-      passed,
+      passed:
+        passed && gatePassed,
 
       checks,
 
       evidence,
 
       reason,
+    };
+  }
+
+  /**
+   * Extracts a live inspected Source from a successful
+   * roblox_inspect_instance result so the security gate can re-check it
+   * deterministically. Returns null when the payload doesn't carry a
+   * Source (e.g. it inspected a non-script instance).
+   */
+  private extractInspectedSource(
+    data: unknown,
+  ): SecurityArtifact | null {
+    if (
+      !data ||
+      typeof data !== "object"
+    ) {
+      return null;
+    }
+
+    const record = data as Record<
+      string,
+      unknown
+    >;
+
+    const path =
+      record.path;
+
+    const className =
+      record.className;
+
+    const properties =
+      (record.properties ??
+        {}) as Record<
+        string,
+        unknown
+      >;
+
+    const source =
+      properties.Source;
+
+    if (
+      typeof path !==
+        "string" ||
+      typeof className !==
+        "string" ||
+      typeof source !==
+        "string" ||
+      source.trim().length === 0
+    ) {
+      return null;
+    }
+
+    return {
+      path,
+      className,
+      source,
     };
   }
 
@@ -3596,6 +4057,21 @@ ${
 `
     : ""
 }
+${
+  state.plan.placement &&
+  state.plan.placement.instruction
+    ? `
+${state.plan.placement.instruction}
+`
+    : ""
+}
+${
+  state.plan.securityDirective
+    ? `
+${state.plan.securityDirective}
+`
+    : ""
+}
 ==================================================
 SUCCESS CRITERIA
 ==================================================
@@ -3821,6 +4297,20 @@ If the requested task is possible with available tools, perform it.
     ) {
       console.log(
         `🎯 Target: ${state.plan.semanticRequest.target.kind} — ${state.plan.semanticRequest.target.label}`,
+      );
+    }
+
+    if (
+      state.plan.placement &&
+      state.plan.placement.placements.length > 0
+    ) {
+      console.log(
+        `🧩 Placement:\n${state.plan.placement.placements
+          .map(
+            (placement) =>
+              `   • ${placement.element} → ${placement.indexPath} (${placement.className})`,
+          )
+          .join("\n")}`,
       );
     }
 

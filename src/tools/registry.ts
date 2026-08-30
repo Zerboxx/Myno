@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 
 import { jsonSchemaSummary } from "../agent/schema-correction.js";
+import { compactAIDefinitions } from "./aidef.js";
 
 export type { ToolGroup } from "./types.js";
 
@@ -26,6 +27,12 @@ export interface ToolExposureOptions {
   includeDescriptions?: boolean;
   sort?: boolean;
   maxTools?: number;
+  /**
+   * Trim long `description` prose in the returned AI definitions. The
+   * schema structure is preserved; only text length is reduced. Intended
+   * for the model-facing definitions to keep per-call context small.
+   */
+  compactDescriptions?: boolean;
 }
 
 const DESTRUCTIVE_NAME_PATTERNS = [
@@ -188,7 +195,7 @@ export class ToolRegistry {
       selected = selected.slice(0, options.maxTools);
     }
 
-    return selected.map((entry) => ({
+    const definitions: AIToolDefinition[] = selected.map((entry) => ({
       type: "function" as const,
       function: {
         name: entry.tool.name,
@@ -202,6 +209,12 @@ export class ToolRegistry {
         >,
       },
     }));
+
+    if (options.compactDescriptions) {
+      return compactAIDefinitions(definitions);
+    }
+
+    return definitions;
   }
 
   async execute(

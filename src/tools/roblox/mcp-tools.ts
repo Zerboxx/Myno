@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import { isStudioDiscoveryTool } from "../registry.js";
 import type { ToolDefinition } from "../types.js";
 import type { RobloxMCPClient } from "./mcp-client.js";
 
@@ -227,9 +226,14 @@ function createMCPTool(
     mcpSchemaToZod(
       mcpTool.inputSchema,
       {
-        optionalStudioId:
-          isStudioDiscoveryTool(mcpTool.name) ||
-          isStudioDiscoveryTool(registeredName),
+        /*
+         * studio_id is ALWAYS resolved and injected by the agent's
+         * execution layer (see normalizeToolArguments). Declaring it
+         * optional in the schema stops models from hoisting a literal
+         * placeholder into a required field, which used to cause a
+         * stale-session retry loop on the first call of every task.
+         */
+        optionalStudioId: true,
       },
     );
 

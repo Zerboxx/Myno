@@ -30,6 +30,20 @@ export interface VerificationPromptInput {
   }>;
 
   establishedEvidence: string;
+
+  /**
+   * The deterministic placement layout instruction (from the placement
+   * engine), when the plan resolved one. Lets verification check the
+   * exact expected paths instead of guessing where the build should be.
+   */
+  expectedLayoutInstruction?: string;
+
+  /**
+   * Deterministic SECURITY & SERVER-AUTHORITY gate block (rendered by
+   * ./agent/security/analyze.ts). When present, lists the HIGH findings
+   * that MUST be resolved and re-inspected before the task is complete.
+   */
+  securitySection?: string;
 }
 
 export const VERIFICATION_USER_PROMPT =
@@ -52,6 +66,16 @@ export function buildVerificationPrompt(
           `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: ${criterion.description}`,
       )
       .join("\n");
+
+  const layoutSection =
+    input.expectedLayoutInstruction
+      ? `\nThe placement engine resolved the expected structure. Verify the build is AT these exact paths with these exact classes:\n${input.expectedLayoutInstruction}`
+      : "";
+
+  const securitySection =
+    input.securitySection
+      ? `\n${input.securitySection}`
+      : "";
 
   return `
 You are the verification engine for an autonomous Roblox development agent.
@@ -164,6 +188,9 @@ SUCCESS CRITERIA
 ==================================================
 
 ${criteriaSection}
+
+${layoutSection}
+${securitySection}
 
 ==================================================
 ALREADY ESTABLISHED IN THIS SESSION

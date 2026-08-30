@@ -340,10 +340,36 @@ export function findStudioIdParameterKey(
 }
 
 /**
+ * Detects literal placeholder junk that models frequently emit when a
+ * schema marks a field required but the value is unknown — e.g. the
+ * literal string "studio_id", "<studio_id>", "TODO", "default", or a
+ * too-short dummy. Such a value must be treated as MISSING so the
+ * resolved studio_id gets injected instead of the placeholder being
+ * sent to the MCP server. Genuine Roblox Studio plugin ids are always
+ * 36-character UUIDs, so anything shorter is never a real id either.
+ */
+export function looksLikePlaceholderValue(
+  value: string,
+): boolean {
+  const trimmed = value.trim();
+
+  if (
+    /^(studio_?id|session_?id|<[^>]*>|default|example|any|todo|fixme|tbd|placeholder|unknown|none|null|undefined|n\/a|your|your[\s_-]*studio[\s_-]*id|x{2,}|-{2,}|\s*)$/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+
+  return trimmed.length < 8;
+}
+
+/**
  * Injects the resolved studio_id into a tool call's arguments, but
  * only when the tool's schema actually has a studio_id-shaped
- * parameter and the model didn't already supply a non-empty value.
- * Never overwrites an explicitly provided value.
+ * parameter and the model didn't already supply a real value. The
+ * literal placeholder strings models hoist into required fields
+ * (e.g. "studio_id") are treated as missing, never passed through.
  */
 export function normalizeRobloxToolArguments(
   args: Record<string, unknown>,
@@ -359,11 +385,12 @@ export function normalizeRobloxToolArguments(
 
   const existing = args[studioIdKey];
 
-  const hasValidExisting =
+  const hasRealExisting =
     typeof existing === "string" &&
-    existing.trim().length > 0;
+    existing.trim().length > 0 &&
+    !looksLikePlaceholderValue(existing);
 
-  if (hasValidExisting) {
+  if (hasRealExisting) {
     return { normalized: args, studioIdInjected: false };
   }
 
