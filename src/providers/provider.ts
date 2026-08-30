@@ -51,6 +51,10 @@ export interface ChatRequest {
 
   stream?: boolean;
 
+  contextLength?: number;
+
+  onToken?: (delta: string) => void;
+
   tools?: AIToolDefinition[];
 }
 

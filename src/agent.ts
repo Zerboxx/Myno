@@ -46,6 +46,29 @@ import type {
   SemanticRequest,
   SkillSelection,
 } from "./agent/skills/types.js";
+import {
+  hasBuildEvidence as hasBuildEvidencePure,
+  hasPostBuildInspection as hasPostBuildInspectionPure,
+  isBuildEvidenceToolByName,
+} from "./agent/verify-gating.js";
+import {
+  buildPhaseInstruction as renderPhaseInstruction,
+  injectPhaseInstruction as injectPhaseGuidance,
+} from "./agent/phase.js";
+import {
+  serializeToolResult as serializeResult,
+  summarizeEvidence as summarizeToolData,
+  trimToHistory,
+  truncate as truncateText,
+} from "./agent/format.js";
+import {
+  buildFailureResponse as renderFailureResponse,
+  buildSuccessfulResponse as renderSuccessfulResponse,
+} from "./agent/report.js";
+import {
+  VERIFICATION_USER_PROMPT,
+  buildVerificationPrompt,
+} from "./agent/verify-prompt.js";
 
 import {
   buildMemoryPrompt,
@@ -378,6 +401,12 @@ export class Agent {
 
   private readonly memory?: MemoryStore;
 
+  private chatTokenSink?: (
+    delta: string,
+  ) => void;
+
+  private streamingEnabled = false;
+
   constructor(
     router: ModelRouter,
     tools: ToolRegistry,
@@ -398,8 +427,15 @@ export class Agent {
    * PUBLIC API
    * ======================================================================== */
 
-  async run(userMessage: string): Promise<AgentResponse> {
+  async run(
+    userMessage: string,
+    options?: {
+      onToken?: (delta: string) => void;
+    },
+  ): Promise<AgentResponse> {
     const message = userMessage.trim();
+
+    this.chatTokenSink = options?.onToken;
 
     if (!message) {
       throw new Error(
@@ -420,6 +456,11 @@ export class Agent {
     const plan = this.createInitialPlan(message);
 
     task.capability = plan.capability;
+
+    this.streamingEnabled =
+      plan.capability === "chat" &&
+      typeof this.chatTokenSink ===
+        "function";
 
     const state: AgentState = {
       task,
@@ -507,6 +548,8 @@ export class Agent {
 
     const provider = selectedModel.provider;
     const model = selectedModel.model;
+    const contextLength =
+      selectedModel.contextLength;
 
     state.messages =
       this.createInitialMessages(state);
@@ -635,6 +678,7 @@ export class Agent {
             state.messages,
             exposedTools,
             state.phase,
+            contextLength,
           );
 
         const assistantMessage =
@@ -709,6 +753,7 @@ export class Agent {
               state,
               provider,
               model,
+              contextLength,
             );
 
           if (verification.passed) {
@@ -1464,6 +1509,7 @@ private createInitialPlan(
     messages: AIMessage[],
     tools: AIToolDefinition[],
     phase: AgentPhase,
+    contextLength?: number,
   ): Promise<ChatResponse> {
     const phaseInstruction =
       this.buildPhaseInstruction(
@@ -1486,7 +1532,14 @@ private createInitialPlan(
           ? 0
           : DEFAULT_TEMPERATURE,
 
-      stream: false,
+      stream: this.streamingEnabled,
+
+      contextLength,
+
+      onToken:
+        this.streamingEnabled
+          ? this.chatTokenSink
+          : undefined,
 
       tools:
         tools.length > 0
@@ -1499,137 +1552,18 @@ private createInitialPlan(
     messages: AIMessage[],
     instruction: string,
   ): AIMessage[] {
-    if (
-      messages.length === 0
-    ) {
-      return messages;
-    }
-
-    const first =
-      messages[0];
-
-    if (
-      first.role !== "system"
-    ) {
-      return [
-        {
-          role: "system",
-
-          content: instruction,
-        },
-
-        ...messages,
-      ];
-    }
-
-    return [
-      {
-        ...first,
-
-        content:
-          `${first.content}\n\n${instruction}`,
-      },
-
-      ...messages.slice(1),
-    ];
+    return injectPhaseGuidance(
+      messages,
+      instruction,
+    );
   }
 
   private buildPhaseInstruction(
     phase: AgentPhase,
   ): string {
-    switch (phase) {
-      case "inspect":
-        return `
-CURRENT AGENT PHASE: INSPECT
-
-Your priority is to understand the existing Roblox/project state.
-
-Use inspection tools before making significant changes.
-
-Do not create duplicates.
-Do not assume names, parents, scripts, or objects.
-Use actual inspection results as the source of truth.
-`;
-
-      case "build":
-        return `
-CURRENT AGENT PHASE: BUILD
-
-Your priority is to perform the requested change.
-
-Use real tools.
-Do not merely describe code that could perform the change.
-Do not write fake JSON tool calls.
-Prefer Roblox tools for Roblox changes.
-
-After every important operation, use the returned tool result to decide what happens next.
-`;
-
-      case "test":
-        return `
-CURRENT AGENT PHASE: TEST
-
-Your priority is runtime validation.
-
-Start or run the appropriate Roblox test/playtest when available.
-Inspect runtime output and errors.
-Do not claim the feature works just because a script was created.
-`;
-
-      case "debug":
-        return `
-CURRENT AGENT PHASE: DEBUG
-
-Something did not satisfy the task.
-
-Inspect the current state and diagnose the actual failure.
-Make the smallest safe correction.
-Then test or inspect again.
-
-Do not simply repeat the exact failed operation.
-`;
-
-      case "verify":
-        return `
-CURRENT AGENT PHASE: VERIFY
-
-You must establish concrete evidence that the requested outcome exists.
-
-Do not treat your own previous response as evidence.
-Use inspection/runtime tools.
-
-A sentence such as "it should work" is not verification.
-Only actual tool results count as evidence.
-`;
-      case "plan":
-        return `
-CURRENT AGENT PHASE: PLAN
-
-Break the user's objective into concrete executable steps.
-
-Prefer existing project structures.
-Avoid unnecessary changes.
-The plan must lead to actual tool execution when tools are required.
-`;
-
-      case "understand":
-        return `
-CURRENT AGENT PHASE: UNDERSTAND
-
-Understand the user's exact objective, constraints, and expected final state.
-
-If the task is actionable, proceed toward execution rather than giving a tutorial.
-`;
-
-      case "complete":
-        return `
-The task has passed its required completion checks.
-Return a concise factual result based only on the evidence collected.
-`;
-
-      default:
-        return "";
-    }
+    return renderPhaseInstruction(
+      phase,
+    );
   }
 
   /* ==========================================================================
@@ -2284,6 +2218,7 @@ Switch to diagnosis:
     state: AgentState,
     provider: AIProvider,
     model: string,
+    contextLength?: number,
   ): Promise<VerificationState> {
     state.verification.attempted =
       true;
@@ -2327,192 +2262,87 @@ Switch to diagnosis:
         {
           role: "system",
 
-          content: `
-You are the verification engine for an autonomous Roblox development agent.
+          content:
+            buildVerificationPrompt({
+              intent:
+                state.plan.intent,
 
-You are NOT a normal chatbot.
+              capability:
+                state.plan
+                  .capability,
 
-Your job is to actually accomplish the user's objective using the tools available to you.
+              objective:
+                state.plan
+                  .objective,
 
-==================================================
-CORE RULES
-==================================================
+              needsRoblox:
+                state.plan
+                  .needsRoblox,
 
-1. ACT, DON'T JUST EXPLAIN.
-   If a tool can perform the requested operation, use it.
+              requiresBuild:
+                state.plan
+                  .requiresBuild,
 
-2. NEVER FAKE TOOL CALLS.
-   JSON written inside assistant content is not a tool call.
+              requiresTesting:
+                state.plan
+                  .requiresTesting,
 
-3. NEVER CLAIM SUCCESS WITHOUT EVIDENCE.
-   Creating a file is not proof that Roblox changed.
-   A successful create operation is not automatically proof of final functionality.
-   A model's own statement is never sufficient evidence.
+              requiresVerification:
+                state.plan
+                  .requiresVerification,
 
-4. INSPECT BEFORE SIGNIFICANT CHANGES.
-   Understand existing project structure before modifying it.
+              needsFiles:
+                state.plan
+                  .needsFiles,
 
-5. AVOID DUPLICATES.
-   Reuse appropriate existing objects/systems when possible.
+              needsTerminal:
+                state.plan
+                  .needsTerminal,
 
-6. PREFER ROBLOX TOOLS FOR ROBLOX WORK.
-   Filesystem operations are not a substitute for changing Roblox Studio.
+              explicitReadOnly:
+                state.plan
+                  .explicitReadOnly,
 
-7. TEST WHEN RUNTIME BEHAVIOR MATTERS.
+              protectedTargets:
+                state.plan
+                  .protectedTargets,
 
-8. VERIFY BEFORE FINISHING.
-   Required success criteria must have concrete supporting evidence.
+              studioContextSummary:
+                this.describeStudioContext(
+                  state,
+                ),
 
-9. RECOVER FROM FAILURES.
-   Diagnose tool errors instead of repeating the same failed operation blindly.
+              successCriteria:
+                state.plan
+                  .successCriteria,
 
-10. MAKE THE SMALLEST SAFE CHANGE.
-    Do not restructure unrelated parts of the project.
-
-==================================================
-ROBLOX RULES
-==================================================
-
-For Roblox tasks:
-
-- Roblox Studio is the target environment.
-- Use inspection tools to understand the current state.
-- Use building tools to make actual Studio changes.
-- Use execution/playtest tools to validate behavior.
-- Use output/error tools to diagnose runtime failures.
-- Never assume an object exists.
-- Never assume a script executed correctly.
-- Never confuse source code on disk with live Roblox state.
-- studio_id is handled automatically by the runtime — you do not need
-  to discover, remember, or pass it yourself.
-
-==================================================
-DESTRUCTIVE OPERATIONS
-==================================================
-
-Destructive operations include deleting, destroying, wiping, clearing, resetting, replacing, or shutting down project content.
-
-Only perform destructive operations when the user's request clearly authorizes them.
-
-Do not interpret a general request such as "build X" as permission to delete unrelated content.
-
-==================================================
-CURRENT TASK
-==================================================
-
-Intent:
-${state.plan.intent}
-
-Capability:
-${state.plan.capability}
-
-Objective:
-${state.plan.objective}
-
-Needs Roblox:
-${state.plan.needsRoblox}
-
-Needs Build:
-${state.plan.requiresBuild}
-
-Needs Testing:
-${state.plan.requiresTesting}
-
-Needs Verification:
-${state.plan.requiresVerification}
-
-Needs Files:
-${state.plan.needsFiles}
-
-Needs Terminal:
-${state.plan.needsTerminal}
-
-Explicit Read-Only (do not modify/build/create anything):
-${state.plan.explicitReadOnly}
-${
-  state.plan.protectedTargets.length >
-  0
-    ? `\nProtected (do not modify, everything else is allowed):\n${state.plan.protectedTargets
-        .map(
-          (target) => `- ${target}`,
-        )
-        .join("\n")}\n`
-    : ""
-}
-Roblox Studio Context:
-${this.describeStudioContext(
-  state,
-)}
-
-==================================================
-SUCCESS CRITERIA
-==================================================
-
-${state.plan.successCriteria
-  .map(
-    (criterion) =>
-      `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: ${criterion.description}`,
-  )
-  .join("\n")}
-
-==================================================
-ALREADY ESTABLISHED IN THIS SESSION
-==================================================
-
-The main agent already ran the following tool calls before reaching
-verification. Their results are real evidence — reuse concrete values
-(such as IDs) from them instead of re-deriving or re-guessing. Only
-call a tool again if the current state may genuinely have changed
-since it ran.
-
-${
-  state.executedTools.filter(
-    (execution) => execution.success,
-  ).length > 0
-    ? state.executedTools
-        .filter(
-          (execution) =>
-            execution.success,
-        )
-        .map(
-          (execution) =>
-            `- ${execution.name} → ${this.summarizeEvidence(
-              execution.data,
-            )}`,
-        )
-        .join("\n")
-    : "(no successful tool calls yet)"
-}
-
-==================================================
-EXECUTION STRATEGY
-==================================================
-
-Follow this lifecycle when appropriate:
-
-UNDERSTAND
-→ INSPECT
-→ PLAN
-→ BUILD
-→ EXECUTE
-→ TEST
-→ DEBUG
-→ VERIFY
-→ COMPLETE
-
-Do not skip verification merely because the last tool returned success.
-
-Do not provide a tutorial unless the user explicitly asks for instructions.
-
-If the requested task is possible with available tools, perform it.
-`,
+              establishedEvidence:
+                state.executedTools.filter(
+                  (execution) =>
+                    execution
+                      .success,
+                ).length > 0
+                  ? state.executedTools
+                      .filter(
+                        (execution) =>
+                          execution.success,
+                      )
+                      .map(
+                        (execution) =>
+                          `- ${execution.name} → ${this.summarizeEvidence(
+                            execution.data,
+                          )}`,
+                      )
+                      .join("\n")
+                  : "(no successful tool calls yet)",
+            }),
         },
 
         {
           role: "user",
 
           content:
-            "Verify the task now, using the already-established results above wherever they are still sufficient.",
+            VERIFICATION_USER_PROMPT,
         },
       ];
 
@@ -2526,6 +2356,8 @@ If the requested task is possible with available tools, perform it.
         temperature: 0,
 
         stream: false,
+
+        contextLength,
 
         tools:
           verificationTools,
@@ -2672,6 +2504,8 @@ If the requested task is possible with available tools, perform it.
           temperature: 0,
 
           stream: false,
+
+          contextLength,
 
           tools:
             verificationTools,
@@ -3066,74 +2900,30 @@ If the requested task is possible with available tools, perform it.
     );
   }
 
-  private hasBuildEvidence(
-    state: AgentState,
-  ): boolean {
-    return state.executedTools.some(
-      (execution) =>
-        execution.success &&
-        this.isBuildEvidenceTool(execution.name),
+  private isBuildEvidenceTool(name: string): boolean {
+    return isBuildEvidenceToolByName(
+      name,
+      (n) => this.tools.getGroup(n),
     );
   }
 
-  private isBuildEvidenceTool(name: string): boolean {
-    const group = this.tools.getGroup(name);
-
-    if (group === "roblox-building") {
-      return true;
-    }
-
-    const lower = name.toLowerCase();
-
-    if (
-      /create|build|insert|modify|update|set_|move_|clone_|duplicate_/.test(
-        lower,
-      )
-    ) {
-      return true;
-    }
-
-    /*
-     * Official Studio MCP often mutates via execute_luau / generate_*
-     * rather than a dedicated create_part tool.
-     */
-    return (
-      lower.includes("execute_luau") ||
-      lower.includes("execute_code") ||
-      lower.includes("run_luau") ||
-      lower.includes("generate_procedural") ||
-      lower.includes("generate_mesh")
+  private hasBuildEvidence(
+    state: AgentState,
+  ): boolean {
+    return hasBuildEvidencePure(
+      state.executedTools,
+      (n) => this.tools.getGroup(n),
     );
   }
 
   private hasPostBuildInspection(
     state: AgentState,
   ): boolean {
-    let lastBuildIndex = -1;
-
-    for (let index = 0; index < state.executedTools.length; index++) {
-      const execution = state.executedTools[index];
-
-      if (
-        execution.success &&
-        this.isBuildEvidenceTool(execution.name)
-      ) {
-        lastBuildIndex = index;
-      }
-    }
-
-    if (lastBuildIndex < 0) {
-      return false;
-    }
-
-    return state.executedTools
-      .slice(lastBuildIndex + 1)
-      .some(
-        (execution) =>
-          execution.success &&
-          this.tools.getGroup(execution.name) === "roblox-inspection" &&
-          !isStudioDiscoveryTool(execution.name),
-      );
+    return hasPostBuildInspectionPure(
+      state.executedTools,
+      (n) => this.tools.getGroup(n),
+      isStudioDiscoveryTool,
+    );
   }
 
   private hasTestingEvidence(
@@ -3198,88 +2988,55 @@ Do not repeat a failed operation without diagnosing why it failed.
     state: AgentState,
     fallbackContent: string,
   ): string {
-    const criteria =
-      state.plan.successCriteria
-        .filter(
-          (criterion) =>
-            criterion.required,
-        )
-        .map(
-          (criterion) => {
-            const check =
-              state.verification.checks.find(
-                (item) =>
-                  item.id ===
-                  criterion.id,
-              );
-
-            return check?.passed
-              ? `✓ ${criterion.description}`
-              : `✗ ${criterion.description}`;
-          },
-        );
-
-    if (
-      criteria.length === 0
-    ) {
-      return (
-        fallbackContent ||
-        "Task completed and verified."
-      );
-    }
-
-    return `
-Task completed and verified.
-
-${criteria.join("\n")}
-`;
+    return renderSuccessfulResponse(
+      state.plan.successCriteria,
+      state.verification.checks,
+      fallbackContent,
+    );
   }
 
   private buildFailureResponse(
     state: AgentState,
   ): string {
-    const failedTools =
-      state.executedTools
-        .filter(
-          (execution) =>
-            !execution.success,
-        )
-        .map(
-          (execution) =>
-            execution.name,
-        );
+    return renderFailureResponse({
+      executedToolNames:
+        state.executedTools
+          .filter(
+            (execution) =>
+              !execution.success,
+          )
+          .map(
+            (execution) =>
+              execution.name,
+          ),
 
-    const uniqueFailedTools =
-      [...new Set(
-        failedTools,
-      )];
+      studioUnavailableError:
+        state.studioContext
+          .status === "unavailable"
+          ? state.studioContext
+              .error
+          : undefined,
 
-    const reason =
-      state.studioContext.status ===
-        "unavailable" &&
-      state.studioContext.error
-        ? state.studioContext.error
-        : state.verification.reason ||
-          state.errors.at(-1)
-            ?.message ||
-          "Insufficient evidence.";
+      verificationReason:
+        state.verification
+          .reason,
 
-    return `
-I could not honestly verify that the requested task was completed.
+      lastError:
+        state.errors.at(-1)
+          ?.message,
 
-Reason:
-${this.truncate(
-  reason,
-  MAX_ERROR_CHARS,
-)}
-${
-  uniqueFailedTools.length > 0
-    ? `\nFailed tools: ${uniqueFailedTools.join(", ")}`
-    : ""
-}
+      truncate: (
+        value,
+        max,
+      ) =>
+        this.truncate(
+          value,
+          max,
+        ),
 
-No completion claim was made because the required result was not sufficiently verified.
-`;
+      maxErrorChars:
+        MAX_ERROR_CHARS,
+    });
   }
 
   private fail(
@@ -3916,106 +3673,32 @@ If the requested task is possible with available tools, perform it.
       error?: string;
     },
   ): string {
-    const payload = {
-      success:
-        result.success,
-
-      data:
-        result.data,
-
-      error:
-        result.error,
-    };
-
-    let serialized =
-      JSON.stringify(
-        payload,
-        null,
-        2,
-      );
-
-    if (
-      serialized.length >
-      MAX_TOOL_RESULT_CHARS
-    ) {
-      serialized =
-        serialized.slice(
-          0,
-          MAX_TOOL_RESULT_CHARS,
-        ) +
-        "\n...[tool result truncated]";
-    }
-
-    return serialized;
+    return serializeResult(
+      result,
+      MAX_TOOL_RESULT_CHARS,
+    );
   }
 
   private summarizeEvidence(
     data: unknown,
   ): string {
-    if (
-      data === undefined ||
-      data === null
-    ) {
-      return "tool returned success with no data";
-    }
-
-    if (
-      typeof data === "string"
-    ) {
-      return this.truncate(
-        data,
-        2500,
-      );
-    }
-
-    try {
-      return this.truncate(
-        JSON.stringify(data),
-        2500,
-      );
-    } catch {
-      return String(data);
-    }
+    return summarizeToolData(
+      data,
+      (value, max) =>
+        this.truncate(
+          value,
+          max,
+        ),
+    );
   }
 
   private trimMessageHistory(
     state: AgentState,
   ): void {
-    if (
-      state.messages.length <=
-      MAX_HISTORY_MESSAGES
-    ) {
-      return;
-    }
-
-    const systemMessages =
-      state.messages.filter(
-        (message) =>
-          message.role ===
-          "system",
-      );
-
-    const nonSystemMessages =
-      state.messages.filter(
-        (message) =>
-          message.role !==
-          "system",
-      );
-
-    const keep =
-      MAX_HISTORY_MESSAGES -
-      systemMessages.length;
-
-    state.messages = [
-      ...systemMessages.slice(
-        0,
-        1,
-      ),
-
-      ...nonSystemMessages.slice(
-        -keep,
-      ),
-    ];
+    state.messages = trimToHistory(
+      state.messages,
+      MAX_HISTORY_MESSAGES,
+    );
   }
 
   /**
@@ -4086,19 +3769,7 @@ If the requested task is possible with available tools, perform it.
     value: string,
     max: number,
   ): string {
-    if (
-      value.length <= max
-    ) {
-      return value;
-    }
-
-    return (
-      value.slice(
-        0,
-        max,
-      ) +
-      "\n...[truncated]"
-    );
+    return truncateText(value, max);
   }
 
   private errorMessage(

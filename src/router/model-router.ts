@@ -16,6 +16,7 @@ const ModelConfigSchema = z.object({
   provider: z.string().min(1),
   model: z.string().min(1),
   capabilities: z.array(ModelCapabilitySchema),
+  contextLength: z.number().int().positive().optional(),
 });
 
 export const ModelsConfigSchema = z.object({
@@ -41,6 +42,7 @@ export class ModelRouter {
   getModel(capability: ModelCapability): {
     provider: AIProvider;
     model: string;
+    contextLength?: number;
   } {
     const config = this.models.find((entry) =>
       entry.capabilities.includes(capability),
@@ -63,6 +65,7 @@ export class ModelRouter {
     return {
       provider,
       model: config.model,
+      contextLength: config.contextLength,
     };
   }
 }

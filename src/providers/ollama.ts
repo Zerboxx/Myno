@@ -38,6 +38,24 @@ interface OllamaChatResponse {
   done_reason?: string;
 }
 
+interface OllamaStreamDatum {
+  model?: string;
+
+  message?: {
+    role?: string;
+
+    content?: string;
+
+    thinking?: string;
+
+    tool_calls?: OllamaToolCall[];
+  };
+
+  done?: boolean;
+
+  done_reason?: string;
+}
+
 export class OllamaProvider implements AIProvider {
   readonly name = "ollama";
 
@@ -102,7 +120,8 @@ export class OllamaProvider implements AIProvider {
             temperature:
               request.temperature ?? 0.2,
 
-            num_ctx: 32768,
+            num_ctx:
+              request.contextLength ?? 32768,
           },
         }),
       },
@@ -117,10 +136,128 @@ export class OllamaProvider implements AIProvider {
       );
     }
 
+    if (
+      request.stream &&
+      request.onToken
+    ) {
+      return this.readStreamingResponse(
+        response,
+        request,
+      );
+    }
+
     const data =
       (await response.json()) as OllamaChatResponse;
 
     return this.normalizeResponse(data);
+  }
+
+  private async readStreamingResponse(
+    response: Response,
+    request: ChatRequest,
+  ): Promise<ChatResponse> {
+    const reader =
+      response.body?.getReader();
+
+    if (!reader) {
+      throw new Error(
+        "Ollama streaming response has no readable body.",
+      );
+    }
+
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let fullContent = "";
+    let toolCalls:
+      | OllamaToolCall[]
+      | undefined;
+    let doneReason:
+      | string
+      | undefined;
+
+    for (;;) {
+      const { done, value } =
+        await reader.read();
+
+      if (done) {
+        break;
+      }
+
+      buffer +=
+        decoder.decode(value, {
+          stream: true,
+        });
+
+      let newline: number;
+
+      while (
+        (newline = buffer.indexOf("\n")) !==
+        -1
+      ) {
+        const line =
+          buffer
+            .slice(0, newline)
+            .trim();
+
+        buffer = buffer.slice(newline + 1);
+
+        if (!line) {
+          continue;
+        }
+
+        let datum: OllamaStreamDatum;
+
+        try {
+          datum =
+            JSON.parse(line) as OllamaStreamDatum;
+        } catch {
+          continue;
+        }
+
+        const delta =
+          datum.message?.content;
+
+        if (
+          typeof delta === "string" &&
+          delta.length > 0
+        ) {
+          fullContent += delta;
+
+          request.onToken?.(delta);
+        }
+
+        if (
+          datum.message?.tool_calls &&
+          datum.message.tool_calls.length > 0
+        ) {
+          toolCalls =
+            datum.message.tool_calls;
+        }
+
+        if (
+          datum.done === true
+        ) {
+          doneReason =
+            datum.done_reason;
+        }
+      }
+    }
+
+    return this.normalizeResponse({
+      model: request.model,
+
+      message: {
+        role: "assistant",
+
+        content: fullContent,
+
+        tool_calls: toolCalls,
+      },
+
+      done: true,
+
+      done_reason: doneReason,
+    });
   }
 
   private normalizeResponse(

@@ -581,18 +581,42 @@ async function main() {
          *   → Filesystem
          */
 
+        const printedResponse = {
+          any: false,
+        };
+
         const response =
           await agent.run(
             userMessage,
+            {
+              onToken: (delta) => {
+                if (
+                  !printedResponse.any
+                ) {
+                  printedResponse.any =
+                    true;
+
+                  console.log(
+                    "\n🤖 AGENT RESPONSE\n",
+                  );
+                }
+
+                process.stdout.write(
+                  delta,
+                );
+              },
+            },
           );
 
-        console.log(
-          "\n🤖 AGENT RESPONSE\n",
-        );
+        if (!printedResponse.any) {
+          console.log(
+            "\n🤖 AGENT RESPONSE\n",
+          );
 
-        console.log(
-          response.content,
-        );
+          console.log(
+            response.content,
+          );
+        }
 
         console.log(
           "\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",

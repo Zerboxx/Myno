@@ -40,6 +40,16 @@ const DESTRUCTIVE_NAME_PATTERNS = [
   "shutdown",
 ];
 
+function isVerboseLogging(): boolean {
+  const flag =
+    process.env.AGENT_VERBOSE;
+
+  return (
+    flag === "1" ||
+    flag === "true"
+  );
+}
+
 export class ToolRegistry {
   private readonly tools = new Map<string, RegisteredTool>();
 
@@ -68,10 +78,12 @@ export class ToolRegistry {
     const groupInferred = group === undefined && tool.group === undefined;
 
     if (groupInferred) {
-      console.warn(
-        `[ToolRegistry] "${name}" registered without an explicit group; ` +
-          `inferred "${resolvedGroup}" from its name.`,
-      );
+      if (isVerboseLogging()) {
+        console.warn(
+          `[ToolRegistry] "${name}" registered without an explicit group; ` +
+            `inferred "${resolvedGroup}" from its name.`,
+        );
+      }
     }
 
     const destructive =

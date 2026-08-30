@@ -9,7 +9,8 @@
         "coding",
         "debugging",
         "analysis"
-      ]
+      ],
+      "contextLength": 32768
     }
   ]
 }
