@@ -1,0 +1,6932 @@
+
+===== FILE: src\agent.ts =====
+
+import crypto from "node:crypto";
+import {
+  createToolFailureTracker,
+  recordToolFailure,
+  recordToolSuccess,
+} from "./tools/tool-validator.js";
+
+import type {
+  AIMessage,
+  AIProvider,
+  AIToolCall,
+  AIToolDefinition,
+  ChatResponse,
+} from "./providers/provider.js";
+
+import {
+  ModelRouter,
+  type ModelCapability,
+} from "./router/model-router.js";
+
+import {
+  ToolRegistry,
+  type ToolGroup,
+} from "./tools/registry.js";
+
+import type {
+  AgentResponse,
+  AgentTask,
+} from "./agent/types.js";
+
+import {
+  extractStudioCandidates,
+  findActiveStudioCandidate,
+  looksLikeStaleStudioError,
+  findStudioIdParameterKey,
+  normalizeRobloxToolArguments,
+  detectFullReadOnlyIntent,
+  detectScopedProtectionTargets,
+  type RobloxStudioContext,
+  type StudioCandidate,
+} from "./agent/studio-context.js";
+
+/* ============================================================================
+ * CONFIGURATION
+ * ========================================================================== */
+
+const toolFailureTracker =
+  createToolFailureTracker();
+  
+const MAX_ITERATIONS = 32;
+const MAX_TOOL_CALLS_PER_ITERATION = 12;
+const MAX_TOTAL_TOOL_CALLS = 100;
+
+const DEFAULT_TEMPERATURE = 0.12;
+
+const MAX_TOOL_RESULT_CHARS = 14000;
+const MAX_ERROR_CHARS = 4000;
+
+const MAX_CONSECUTIVE_FAILURES = 4;
+const MAX_RECOVERY_ATTEMPTS = 6;
+
+const MAX_HISTORY_MESSAGES = 80;
+
+/* ============================================================================
+ * PHASES
+ * ========================================================================== */
+
+type AgentPhase =
+  | "understand"
+  | "inspect"
+  | "plan"
+  | "build"
+  | "execute"
+  | "test"
+  | "debug"
+  | "verify"
+  | "complete"
+  | "failed";
+
+type TaskIntent =
+  | "chat"
+  | "coding"
+  | "building"
+  | "debugging"
+  | "testing"
+  | "inspection"
+  | "planning"
+  | "analysis";
+
+/* ============================================================================
+ * PLAN TYPES
+ * ========================================================================== */
+
+interface SuccessCriterion {
+  id: string;
+  description: string;
+  required: boolean;
+}
+
+interface AgentPlan {
+  intent: TaskIntent;
+
+  capability: ModelCapability;
+
+  objective: string;
+
+  needsRoblox: boolean;
+  needsFiles: boolean;
+  needsTerminal: boolean;
+
+  requiresInspection: boolean;
+  requiresBuild: boolean;
+  requiresTesting: boolean;
+  requiresVerification: boolean;
+
+  destructiveRequested: boolean;
+
+  /**
+   * True when the user explicitly asked the agent not to modify/build/
+   * change/create ANYTHING, unscoped (e.g. "Do not modify anything",
+   * "read-only"). This is a hard safety flag, separate from
+   * requiresBuild, so it survives even if intent detection elsewhere
+   * misfires.
+   *
+   * Deliberately narrower than earlier versions: a SCOPED protection
+   * ("do not modify the existing house") does NOT set this — see
+   * `protectedTargets` below. Only an unscoped negation ("anything" /
+   * "everything" / bare "read-only") counts as full read-only, so a
+   * request that also asks for a real build isn't wrongly blocked
+   * wholesale. See detectFullReadOnlyIntent in ./agent/studio-context.ts.
+   */
+  explicitReadOnly: boolean;
+
+  /**
+   * Free-text targets the user asked NOT to be touched, alongside an
+   * otherwise-permitted request (e.g. "the existing house" from
+   * "build a bed but do not modify the existing house"). This is
+   * surfaced to the model as an instruction to respect, not enforced
+   * as a hard per-object tool block — the architecture has no way to
+   * resolve "the existing house" to a specific Roblox instance without
+   * semantic understanding. Documented limitation, not a false
+   * guarantee.
+   */
+  protectedTargets: string[];
+
+  successCriteria: SuccessCriterion[];
+
+  preferredToolGroups: ToolGroup[];
+
+  reason: string;
+}
+
+/* ============================================================================
+ * EXECUTION TYPES
+ * ========================================================================== */
+
+interface ToolExecution {
+  id: string;
+  name: string;
+  input: unknown;
+
+  success: boolean;
+
+  data?: unknown;
+  error?: string;
+
+  iteration: number;
+  phase: AgentPhase;
+
+  startedAt: string;
+  finishedAt: string;
+}
+
+interface VerificationCheck {
+  id: string;
+
+  description: string;
+
+  passed: boolean;
+
+  evidence: string[];
+
+  sourceTools: string[];
+}
+
+interface VerificationState {
+  required: boolean;
+
+  attempted: boolean;
+
+  passed: boolean;
+
+  checks: VerificationCheck[];
+
+  evidence: string[];
+
+  reason: string;
+}
+
+interface AgentError {
+  phase: AgentPhase;
+
+  message: string;
+
+  tool?: string;
+
+  recoverable: boolean;
+
+  timestamp: string;
+}
+
+interface AgentState {
+  task: AgentTask;
+
+  plan: AgentPlan;
+
+  phase: AgentPhase;
+
+  messages: AIMessage[];
+
+  iterations: number;
+
+  totalToolCalls: number;
+
+  executedTools: ToolExecution[];
+
+  errors: AgentError[];
+
+  verification: VerificationState;
+
+  recoveryAttempts: number;
+
+  /**
+   * Counts consecutive iterations where the agent needed the model to
+   * take a recovery action (a required evidence category is still
+   * unsatisfied) but the model returned no tool call at all — i.e. no
+   * actual progress was attempted. Reset to 0 whenever a tool call
+   * batch actually executes. Used to fail fast instead of burning
+   * through MAX_RECOVERY_ATTEMPTS on iterations that do nothing.
+   */
+  noProgressRecoveryStreak: number;
+
+  /**
+   * Signatures ("toolName:JSON(args)") of tool calls that have already
+   * failed with these exact arguments. Used to block verbatim repeats
+   * of a known-failing call instead of letting the model retry the
+   * same broken input again. Computed from the MODEL-PROVIDED (raw,
+   * pre-injection) arguments, so it is unaffected by automatic
+   * studio_id injection below.
+   */
+  failedCallSignatures: Set<string>;
+
+  consecutiveFailures: number;
+
+  completed: boolean;
+
+  failed: boolean;
+
+  finalContent: string;
+
+  /**
+   * Deterministic, runtime-owned Roblox Studio session context. The
+   * model is never asked to discover or remember studio_id itself —
+   * see ensureRobloxStudioContext().
+   */
+  studioContext: RobloxStudioContext;
+}
+
+/* ============================================================================
+ * AGENT
+ * ========================================================================== */
+
+export class Agent {
+  private readonly router: ModelRouter;
+
+  private readonly tools: ToolRegistry;
+
+  private readonly sessionId: string;
+
+  constructor(
+    router: ModelRouter,
+    tools: ToolRegistry,
+  ) {
+    this.router = router;
+    this.tools = tools;
+
+    /*
+     * IMPORTANT:
+     * Session IDs belong to the Agent instance, not the module.
+     */
+    this.sessionId = crypto.randomUUID();
+  }
+
+  /* ==========================================================================
+   * PUBLIC API
+   * ======================================================================== */
+
+  async run(userMessage: string): Promise<AgentResponse> {
+    const message = userMessage.trim();
+
+    if (!message) {
+      throw new Error(
+        "Agent cannot run an empty request.",
+      );
+    }
+
+    const task: AgentTask = {
+      id: crypto.randomUUID(),
+
+      userMessage: message,
+
+      capability: this.detectCapability(message),
+
+      createdAt: new Date().toISOString(),
+    };
+
+    const plan = this.createInitialPlan(message);
+
+    task.capability = plan.capability;
+
+    const state: AgentState = {
+      task,
+
+      plan,
+
+      phase: "understand",
+
+      messages: [],
+
+      iterations: 0,
+
+      totalToolCalls: 0,
+
+      executedTools: [],
+
+      errors: [],
+
+      verification: {
+        required: plan.requiresVerification,
+
+        attempted: false,
+
+        passed: false,
+
+        checks: [],
+
+        evidence: [],
+
+        reason: "",
+      },
+
+      recoveryAttempts: 0,
+
+      noProgressRecoveryStreak: 0,
+
+      failedCallSignatures: new Set<string>(),
+
+      consecutiveFailures: 0,
+
+      completed: false,
+
+      failed: false,
+
+      finalContent: "",
+
+      studioContext: {
+        status: "not-needed",
+      },
+    };
+
+    this.printTaskHeader(state);
+
+    const selectedModel =
+      this.router.getModel(
+        plan.capability,
+      );
+
+    const provider = selectedModel.provider;
+    const model = selectedModel.model;
+
+    state.messages =
+      this.createInitialMessages(state);
+
+    /*
+     * ================================================================
+     * ROBLOX STUDIO CONTEXT BOOTSTRAP
+     * ================================================================
+     *
+     * Deterministic, runtime-owned session resolution — NOT delegated
+     * to the model. Only triggered when the plan actually needs to
+     * interact with a live Studio (inspect/build/test), not for plain
+     * Roblox-flavored chat that never touches a tool.
+     */
+
+    const needsActiveStudio =
+      plan.needsRoblox &&
+      (
+        plan.requiresInspection ||
+        plan.requiresBuild ||
+        plan.requiresTesting
+      );
+
+    if (needsActiveStudio) {
+      await this.ensureRobloxStudioContext(
+        state,
+      );
+
+      this.printStudioContext(state);
+
+      if (
+        state.studioContext.status ===
+        "unavailable"
+      ) {
+        this.fail(
+          state,
+          state.studioContext.error ??
+            "Roblox Studio context could not be resolved.",
+          false,
+        );
+
+        state.finalContent =
+          this.buildFailureResponse(
+            state,
+          );
+
+        return {
+          taskId: task.id,
+          content: state.finalContent,
+          model,
+          provider: provider.name,
+          success: false,
+        };
+      }
+    }
+
+    /*
+     * ================================================================
+     * MAIN AGENT LOOP
+     * ================================================================
+     */
+
+    for (
+      let iteration = 1;
+      iteration <= MAX_ITERATIONS;
+      iteration++
+    ) {
+      state.iterations = iteration;
+
+      this.printIteration(state);
+
+      if (
+        state.totalToolCalls >=
+        MAX_TOTAL_TOOL_CALLS
+      ) {
+        this.fail(
+          state,
+          "Maximum total tool-call budget reached.",
+          false,
+        );
+
+        break;
+      }
+
+      try {
+        /*
+         * ------------------------------------------------------------
+         * PHASE SELECTION
+         * ------------------------------------------------------------
+         */
+
+        state.phase =
+          this.selectNextPhase(state);
+
+        /*
+         * ------------------------------------------------------------
+         * TOOL SCOPE
+         * ------------------------------------------------------------
+         */
+
+        const exposedTools =
+          this.getToolsForPhase(
+            state,
+          );
+
+        this.printToolScope(
+          state,
+          exposedTools,
+        );
+
+        /*
+         * ------------------------------------------------------------
+         * MODEL CALL
+         * ------------------------------------------------------------
+         */
+
+        const response =
+          await this.callModel(
+            provider,
+            model,
+            state.messages,
+            exposedTools,
+            state.phase,
+          );
+
+        const assistantMessage =
+          response.message;
+
+        /*
+         * Keep the assistant's structured tool
+         * call message exactly as returned.
+         */
+        state.messages.push(
+          assistantMessage,
+        );
+
+        this.trimMessageHistory(
+          state,
+        );
+
+        const toolCalls =
+          assistantMessage.toolCalls ??
+          [];
+
+          
+        /*
+         * ------------------------------------------------------------
+         * TOOL EXECUTION
+         * ------------------------------------------------------------
+         */
+
+        if (toolCalls.length > 0) {
+          state.noProgressRecoveryStreak = 0;
+
+          const limitedCalls =
+            toolCalls.slice(
+              0,
+              MAX_TOOL_CALLS_PER_ITERATION,
+            );
+
+          await this.executeToolCalls(
+            state,
+            limitedCalls,
+          );
+
+          /*
+           * Never finish directly after a tool call.
+           * The model must observe the result first.
+           */
+          continue;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * NO TOOL CALL
+         * ------------------------------------------------------------
+         */
+
+        const content =
+          assistantMessage.content
+            ?.trim() ?? "";
+
+        if (
+          this.requiresEvidenceBeforeCompletion(
+            state,
+          )
+        ) {
+          state.finalContent =
+            content;
+
+          state.phase = "verify";
+
+          const verification =
+            await this.verifyTask(
+              state,
+              provider,
+              model,
+            );
+
+          if (verification.passed) {
+            state.verification =
+              verification;
+
+            state.completed = true;
+
+            state.phase = "complete";
+
+            state.finalContent =
+              this.buildSuccessfulResponse(
+                state,
+                content,
+              );
+
+            break;
+          }
+
+          state.verification =
+            verification;
+
+          state.errors.push({
+            phase: "verify",
+
+            message:
+              verification.reason,
+
+            recoverable: true,
+
+            timestamp:
+              new Date().toISOString(),
+          });
+
+          if (
+            state.recoveryAttempts <
+            MAX_RECOVERY_ATTEMPTS
+          ) {
+            state.recoveryAttempts++;
+
+            state.phase = "debug";
+
+            state.messages.push({
+              role: "user",
+
+              content: `
+Verification did not confirm completion.
+
+Reason:
+${this.truncate(
+  verification.reason,
+  MAX_ERROR_CHARS,
+)}
+
+Do not claim completion.
+
+Recover from the failure.
+Inspect the current state if necessary.
+Use another appropriate tool or correct the previous action.
+Continue until the user's requested outcome is actually achieved and verifiable.
+`,
+            });
+
+            continue;
+          }
+
+          this.fail(
+            state,
+            "Verification failed repeatedly.",
+            true,
+          );
+
+          break;
+        }
+
+        /*
+         * ------------------------------------------------------------
+         * GENERAL "NOT ACTUALLY DONE YET" GATE
+         * ------------------------------------------------------------
+         *
+         * requiresEvidenceBeforeCompletion() above only covers plans
+         * that need build/testing/full verification. A plan that only
+         * requires inspection (requiresVerification=false) had no gate
+         * at all here — the model's plain text was accepted as final
+         * the moment it stopped calling tools, even right after the
+         * only tool call it made had failed. This closes that gap
+         * generically, for any required category, not a specific tool.
+         */
+
+        const unsatisfied =
+          this.getUnsatisfiedRequirements(
+            state,
+          );
+
+        if (unsatisfied.length > 0) {
+          state.errors.push({
+            phase: state.phase,
+
+            message: `Task not yet satisfied: ${unsatisfied.join("; ")}`,
+
+            recoverable: true,
+
+            timestamp:
+              new Date().toISOString(),
+          });
+
+          state.noProgressRecoveryStreak++;
+
+          /*
+           * Two iterations in a row with an outstanding requirement
+           * AND no tool call at all means the model is not attempting
+           * recovery — stop burning iterations and fail clearly
+           * instead of waiting out MAX_RECOVERY_ATTEMPTS.
+           */
+          if (
+            state.noProgressRecoveryStreak >=
+              2 ||
+            state.recoveryAttempts >=
+              MAX_RECOVERY_ATTEMPTS
+          ) {
+            this.fail(
+              state,
+              `Stopped without tool-call progress. Unsatisfied: ${unsatisfied.join("; ")}`,
+              true,
+            );
+
+            break;
+          }
+
+          state.recoveryAttempts++;
+
+          state.phase = "debug";
+
+          state.messages.push({
+            role: "user",
+
+            content: `
+The task is not yet satisfied.
+
+Still missing:
+${unsatisfied.map((item) => `- ${item}`).join("\n")}
+
+You returned a text response instead of taking action. Do not give up
+after a single failed tool call.
+
+If a tool call failed because required input (such as an ID) was
+missing or invalid, look at the tools currently available to you for
+one whose purpose is to discover/list that missing value. Call it,
+read the value it returns, and then retry the original tool using
+that real value — do not guess or invent a placeholder value, and do
+not repeat the exact same failed call with the exact same arguments.
+
+Continue working toward the user's requested outcome.
+`,
+          });
+
+          continue;
+        }
+
+        state.finalContent =
+          content;
+
+        state.completed = true;
+
+        state.phase = "complete";
+
+        break;
+      } catch (error) {
+        const message =
+          this.errorMessage(error);
+
+        state.errors.push({
+          phase: state.phase,
+
+          message,
+
+          recoverable:
+            state.recoveryAttempts <
+            MAX_RECOVERY_ATTEMPTS,
+
+          timestamp:
+            new Date().toISOString(),
+        });
+
+        state.recoveryAttempts++;
+
+        console.error(
+          `[Agent] ${state.phase} error: ${message}`,
+        );
+
+        if (
+          state.recoveryAttempts >=
+          MAX_RECOVERY_ATTEMPTS
+        ) {
+          this.fail(
+            state,
+            message,
+            true,
+          );
+
+          break;
+        }
+
+        state.messages.push({
+          role: "user",
+
+          content: `
+The previous agent step failed.
+
+Error:
+${this.truncate(
+  message,
+  MAX_ERROR_CHARS,
+)}
+
+Do not claim completion.
+
+Recover from the failure.
+Inspect the current state if necessary.
+Use another appropriate tool or correct the previous action.
+Continue until the user's requested outcome is actually achieved and verifiable.
+`,
+        });
+      }
+    }
+
+    if (!state.completed) {
+      state.failed = true;
+
+      state.phase = "failed";
+
+      state.finalContent =
+        this.buildFailureResponse(
+          state,
+        );
+    }
+
+    if (!state.finalContent.trim()) {
+      state.finalContent =
+        state.completed
+          ? "Task completed successfully."
+          : this.buildFailureResponse(
+              state,
+            );
+    }
+
+    return {
+  taskId: task.id,
+  content: state.finalContent,
+  model,
+  provider: provider.name,
+  success: state.completed && !state.failed,
+};
+}
+ 
+/* ==========================================================================
+ * ROBLOX STUDIO CONTEXT
+ * ======================================================================== */
+
+  /**
+   * Resolves (or reuses) the active Roblox Studio session, deterministically,
+   * using the discovery tool the tool registry exposes — never by asking the
+   * model to figure it out. See ./agent/studio-context.ts for the pure
+   * parsing helpers this delegates to.
+   */
+  private async ensureRobloxStudioContext(
+    state: AgentState,
+  ): Promise<void> {
+    if (!state.plan.needsRoblox) {
+      state.studioContext = {
+        status: "not-needed",
+      };
+
+      return;
+    }
+
+    if (
+      state.studioContext.status ===
+        "resolved" &&
+      state.studioContext.studioId
+    ) {
+      return;
+    }
+
+    const discoveryTool =
+      this.findStudioDiscoveryToolName();
+
+    if (!discoveryTool) {
+      state.studioContext = {
+        status: "unresolved",
+        error:
+          "No Roblox Studio discovery tool is registered.",
+      };
+
+      return;
+    }
+
+    const result =
+      await this.tools.execute(
+        discoveryTool,
+        {},
+        {
+          sessionId:
+            this.sessionId,
+        },
+      );
+
+    this.printStudioDiscoveryAttempt(
+      discoveryTool,
+      result,
+    );
+
+    if (!result.success) {
+      state.studioContext = {
+        status: "unavailable",
+        error:
+          result.error ??
+          "Studio discovery failed.",
+      };
+
+      return;
+    }
+
+    const candidates =
+      extractStudioCandidates(
+        result.data,
+      );
+
+    if (candidates.length === 0) {
+      state.studioContext = {
+        status: "unavailable",
+        availableStudios: [],
+        error:
+          "No connected Roblox Studio instance was found.",
+      };
+
+      return;
+    }
+
+    if (candidates.length === 1) {
+      state.studioContext = {
+        status: "resolved",
+        studioId: candidates[0].id,
+        studioName:
+          candidates[0].name,
+        availableStudios:
+          candidates,
+      };
+
+      return;
+    }
+
+    /*
+     * Multiple Studios open. Do not guess — look for an explicit
+     * active/focused/current signal in the raw discovery result
+     * before giving up and asking the user to disambiguate.
+     */
+    const active =
+      findActiveStudioCandidate(
+        result.data,
+        candidates,
+      );
+
+    if (active) {
+      state.studioContext = {
+        status: "resolved",
+        studioId: active.id,
+        studioName: active.name,
+        availableStudios:
+          candidates,
+      };
+
+      return;
+    }
+
+    state.studioContext = {
+      status: "unavailable",
+      availableStudios: candidates,
+      error: `Multiple Roblox Studio instances are open (${candidates.length}) and none is marked active/focused. Ask the user which one to use.`,
+    };
+  }
+
+  /**
+   * Finds the registered tool responsible for listing/discovering open
+   * Roblox Studio instances, by name pattern rather than a single
+   * hardcoded literal — so a differently-named but equivalent MCP tool
+   * is still found.
+   */
+  private findStudioDiscoveryToolName():
+    | string
+    | null {
+    const candidates =
+      this.tools.getAIDefinitions([
+        "roblox-inspection",
+      ]);
+
+    const match = candidates.find(
+      (definition) => {
+        const name =
+          definition.function.name.toLowerCase();
+
+        return (
+          name.includes("studio") &&
+          (name.includes("list") ||
+            name.includes("studios"))
+        );
+      },
+    );
+
+    return match?.function.name ?? null;
+  }
+
+  /**
+   * Schema-driven studio_id injection: looks at the ACTUAL registered
+   * tool's JSON schema for a studio_id-shaped property, rather than a
+   * hardcoded list of tool names. Never overwrites a valid value the
+   * model already supplied.
+   */
+  private normalizeToolArguments(
+    toolName: string,
+    args: Record<string, unknown>,
+    state: AgentState,
+  ): {
+    normalized: Record<string, unknown>;
+    studioIdInjected: boolean;
+  } {
+    if (
+      state.studioContext.status !==
+        "resolved" ||
+      !state.studioContext.studioId
+    ) {
+      return {
+        normalized: args,
+        studioIdInjected: false,
+      };
+    }
+
+    if (
+      toolName ===
+      this.findStudioDiscoveryToolName()
+    ) {
+      return {
+        normalized: args,
+        studioIdInjected: false,
+      };
+    }
+
+    const group =
+      this.tools.getGroup(toolName);
+
+    if (
+      !group ||
+      !group.startsWith("roblox")
+    ) {
+      return {
+        normalized: args,
+        studioIdInjected: false,
+      };
+    }
+
+    const definition = this.tools
+      .getAIDefinitions()
+      .find(
+        (item) =>
+          item.function.name ===
+          toolName,
+      );
+
+    const properties = (
+      definition?.function
+        .parameters as
+        | {
+            properties?: Record<
+              string,
+              unknown
+            >;
+          }
+        | undefined
+    )?.properties;
+
+    const studioIdKey =
+      findStudioIdParameterKey(
+        properties,
+      );
+
+    return normalizeRobloxToolArguments(
+      args,
+      studioIdKey,
+      state.studioContext.studioId,
+    );
+  }
+
+  /* ==========================================================================
+   * PLAN
+   * ======================================================================== */
+
+private createInitialPlan(
+    message: string,
+  ): AgentPlan {
+    const normalized =
+      message.toLowerCase();
+
+    const needsRoblox =
+      this.detectRobloxIntent(
+        normalized,
+      );
+
+    const needsFiles =
+      this.detectFileIntent(
+        normalized,
+      );
+
+    const needsTerminal =
+      this.detectTerminalIntent(
+        normalized,
+      );
+
+    const explicitReadOnly =
+      detectFullReadOnlyIntent(
+        normalized,
+      );
+
+    const protectedTargets =
+      detectScopedProtectionTargets(
+        normalized,
+      );
+
+    /*
+     * An explicit, UNSCOPED "do not modify/build/change anything"
+     * instruction overrides the naive keyword-based build detector
+     * below. A SCOPED protection ("do not modify the existing house")
+     * does not set explicitReadOnly, so a real build request elsewhere
+     * in the same message is not wrongly blocked wholesale.
+     */
+    const requiresBuild =
+      explicitReadOnly
+        ? false
+        : this.detectBuildIntent(
+            normalized,
+          );
+
+    const requiresTesting =
+      this.detectTestingIntent(
+        normalized,
+      );
+
+    const debugging =
+      this.detectDebuggingIntent(
+        normalized,
+      );
+
+    const planning =
+      this.detectPlanningIntent(
+        normalized,
+      );
+
+    const analysis =
+      this.detectAnalysisIntent(
+        normalized,
+      );
+
+    const intent =
+      debugging
+        ? "debugging"
+        : requiresBuild
+          ? "building"
+          : requiresTesting
+            ? "testing"
+            : needsFiles
+              ? "coding"
+              : planning
+                ? "planning"
+                : analysis
+                  ? "analysis"
+                  : "chat";
+
+    const capability =
+      this.capabilityForIntent(
+        intent,
+      );
+
+    const requiresInspection =
+      needsRoblox &&
+      (
+        requiresBuild ||
+        requiresTesting ||
+        debugging ||
+        planning ||
+        analysis ||
+        this.detectInspectionIntent(
+          normalized,
+        )
+      );
+
+    const requiresVerification =
+      needsRoblox &&
+      (
+        requiresBuild ||
+        requiresTesting ||
+        debugging ||
+        planning ||
+        analysis
+      );
+
+    const destructiveRequested =
+      this.detectDestructiveIntent(
+        normalized,
+      );
+
+    const preferredToolGroups =
+      this.resolveToolGroups({
+        needsRoblox,
+
+        needsFiles,
+
+        needsTerminal,
+
+        requiresInspection,
+
+        requiresBuild,
+
+        requiresTesting,
+
+        requiresVerification,
+      });
+
+    const successCriteria =
+      this.buildSuccessCriteria({
+  message,
+  needsRoblox,
+  requiresInspection,
+  requiresBuild,
+  requiresTesting,
+  requiresVerification,
+  needsFiles,
+  needsTerminal,
+});
+
+    return {
+      intent,
+
+      capability,
+
+      objective: message,
+
+      needsRoblox,
+
+      needsFiles,
+
+      needsTerminal,
+
+      requiresInspection,
+
+      requiresBuild,
+
+      requiresTesting,
+
+      requiresVerification,
+
+      destructiveRequested,
+
+      explicitReadOnly,
+
+      protectedTargets,
+
+      successCriteria,
+
+      preferredToolGroups,
+
+      reason: needsRoblox
+        ? "The task targets Roblox Studio or Roblox development."
+        : "The task does not require direct Roblox execution.",
+    };
+  }
+
+  /* ==========================================================================
+   * PHASE ENGINE
+   * ======================================================================== */
+
+  private selectNextPhase(
+    state: AgentState,
+  ): AgentPhase {
+    if (state.completed) {
+      return "complete";
+    }
+
+    if (state.failed) {
+      return "failed";
+    }
+
+    /*
+     * ------------------------------------------------------------
+     * ORDERING NOTE (bug fix, kept from the previous review):
+     *
+     * "verify" used to be checked FIRST, gated only by
+     * `hasPotentiallyCompletedWork` — which is just
+     * `executedTools.length > 0`. That meant once a single tool call
+     * happened (success OR failure), this condition stayed true for
+     * the rest of the task, permanently starving "inspect"/"build"/
+     * "test"/"debug" below of ever being reached again. Phase-specific
+     * readiness is now checked first, matching the documented
+     * lifecycle. No phase was removed; this is a reordering only.
+     * ------------------------------------------------------------
+     */
+
+    if (
+      state.consecutiveFailures >
+      0
+    ) {
+      return "debug";
+    }
+
+    if (
+      state.plan.requiresInspection &&
+      !this.hasInspectionEvidence(
+        state,
+      )
+    ) {
+      return "inspect";
+    }
+
+    if (
+      state.plan.requiresBuild &&
+      !this.hasBuildEvidence(state)
+    ) {
+      return "build";
+    }
+
+    if (
+      state.plan.requiresTesting &&
+      !this.hasTestingEvidence(
+        state,
+      )
+    ) {
+      return "test";
+    }
+
+    if (
+      state.plan.requiresVerification &&
+      this.hasPotentiallyCompletedWork(
+        state,
+      )
+    ) {
+      return "verify";
+    }
+
+    return "execute";
+  }
+
+  /* ==========================================================================
+   * MODEL
+   * ======================================================================== */
+
+  private async callModel(
+    provider: AIProvider,
+    model: string,
+    messages: AIMessage[],
+    tools: AIToolDefinition[],
+    phase: AgentPhase,
+  ): Promise<ChatResponse> {
+    const phaseInstruction =
+      this.buildPhaseInstruction(
+        phase,
+      );
+
+    const modelMessages =
+      this.injectPhaseInstruction(
+        messages,
+        phaseInstruction,
+      );
+
+    return provider.chat({
+      model,
+
+      messages: modelMessages,
+
+      temperature:
+        phase === "verify"
+          ? 0
+          : DEFAULT_TEMPERATURE,
+
+      stream: false,
+
+      tools:
+        tools.length > 0
+          ? tools
+          : undefined,
+    });
+  }
+
+  private injectPhaseInstruction(
+    messages: AIMessage[],
+    instruction: string,
+  ): AIMessage[] {
+    if (
+      messages.length === 0
+    ) {
+      return messages;
+    }
+
+    const first =
+      messages[0];
+
+    if (
+      first.role !== "system"
+    ) {
+      return [
+        {
+          role: "system",
+
+          content: instruction,
+        },
+
+        ...messages,
+      ];
+    }
+
+    return [
+      {
+        ...first,
+
+        content:
+          `${first.content}\n\n${instruction}`,
+      },
+
+      ...messages.slice(1),
+    ];
+  }
+
+  private buildPhaseInstruction(
+    phase: AgentPhase,
+  ): string {
+    switch (phase) {
+      case "inspect":
+        return `
+CURRENT AGENT PHASE: INSPECT
+
+Your priority is to understand the existing Roblox/project state.
+
+Use inspection tools before making significant changes.
+
+Do not create duplicates.
+Do not assume names, parents, scripts, or objects.
+Use actual inspection results as the source of truth.
+`;
+
+      case "build":
+        return `
+CURRENT AGENT PHASE: BUILD
+
+Your priority is to perform the requested change.
+
+Use real tools.
+Do not merely describe code that could perform the change.
+Do not write fake JSON tool calls.
+Prefer Roblox tools for Roblox changes.
+
+After every important operation, use the returned tool result to decide what happens next.
+`;
+
+      case "test":
+        return `
+CURRENT AGENT PHASE: TEST
+
+Your priority is runtime validation.
+
+Start or run the appropriate Roblox test/playtest when available.
+Inspect runtime output and errors.
+Do not claim the feature works just because a script was created.
+`;
+
+      case "debug":
+        return `
+CURRENT AGENT PHASE: DEBUG
+
+Something did not satisfy the task.
+
+Inspect the current state and diagnose the actual failure.
+Make the smallest safe correction.
+Then test or inspect again.
+
+Do not simply repeat the exact failed operation.
+`;
+
+      case "verify":
+        return `
+CURRENT AGENT PHASE: VERIFY
+
+You must establish concrete evidence that the requested outcome exists.
+
+Do not treat your own previous response as evidence.
+Use inspection/runtime tools.
+
+A sentence such as "it should work" is not verification.
+Only actual tool results count as evidence.
+`;
+      case "plan":
+        return `
+CURRENT AGENT PHASE: PLAN
+
+Break the user's objective into concrete executable steps.
+
+Prefer existing project structures.
+Avoid unnecessary changes.
+The plan must lead to actual tool execution when tools are required.
+`;
+
+      case "understand":
+        return `
+CURRENT AGENT PHASE: UNDERSTAND
+
+Understand the user's exact objective, constraints, and expected final state.
+
+If the task is actionable, proceed toward execution rather than giving a tutorial.
+`;
+
+      case "complete":
+        return `
+The task has passed its required completion checks.
+Return a concise factual result based only on the evidence collected.
+`;
+
+      default:
+        return "";
+    }
+  }
+
+  /* ==========================================================================
+   * TOOL SELECTION
+   * ======================================================================== */
+
+  private getToolsForPhase(
+    state: AgentState,
+  ): AIToolDefinition[] {
+    const groups =
+      new Set<ToolGroup>();
+
+    const plan =
+      state.plan;
+
+    if (
+      plan.needsRoblox
+    ) {
+      if (
+        plan.requiresInspection ||
+        state.phase === "inspect" ||
+        state.phase === "debug" ||
+        state.phase === "verify" ||
+        plan.requiresBuild ||
+        plan.requiresTesting
+      ) {
+        groups.add(
+          "roblox-inspection",
+        );
+      }
+
+      if (
+        plan.requiresBuild &&
+        (
+          state.phase === "build" ||
+          state.phase === "debug"
+        )
+      ) {
+        groups.add(
+          "roblox-building",
+        );
+      }
+
+      if (
+        plan.requiresTesting ||
+        state.phase === "test" ||
+        state.phase === "verify"
+      ) {
+        groups.add(
+          "roblox-execution",
+        );
+      }
+    }
+
+    if (
+      plan.needsFiles
+    ) {
+      groups.add(
+        "filesystem",
+      );
+    }
+
+    if (
+      plan.needsTerminal
+    ) {
+      groups.add(
+        "terminal",
+      );
+    }
+
+    if (
+      groups.size === 0
+    ) {
+      groups.add("general");
+    }
+
+    const definitions =
+      this.tools.getAIDefinitions(
+        [...groups],
+        {
+          includeDescriptions: true,
+
+          sort: true,
+
+          maxTools: 64,
+        },
+      );
+
+    if (
+      state.phase === "verify"
+    ) {
+      return definitions.filter(
+        (definition) => {
+          const name =
+            definition.function.name
+              .toLowerCase();
+
+          return (
+            !name.includes(
+              "create",
+            ) &&
+            !name.includes(
+              "delete",
+            ) &&
+            !name.includes(
+              "destroy",
+            ) &&
+            !name.includes(
+              "remove",
+            ) &&
+            !name.includes(
+              "modify",
+            ) &&
+            !name.includes(
+              "update",
+            ) &&
+            !name.includes(
+              "set_",
+            ) &&
+            !name.includes(
+              "move_",
+            ) &&
+            !name.includes(
+              "rename_",
+            )
+          );
+        },
+      );
+    }
+
+    return definitions;
+  }
+
+  private resolveToolGroups(
+    input: {
+      needsRoblox: boolean;
+
+      needsFiles: boolean;
+
+      needsTerminal: boolean;
+
+      requiresInspection: boolean;
+
+      requiresBuild: boolean;
+
+      requiresTesting: boolean;
+
+      requiresVerification: boolean;
+    },
+  ): ToolGroup[] {
+    const groups =
+      new Set<ToolGroup>();
+
+    if (
+      input.needsRoblox
+    ) {
+      if (
+        input.requiresInspection ||
+        input.requiresBuild ||
+        input.requiresTesting ||
+        input.requiresVerification
+      ) {
+        groups.add(
+          "roblox-inspection",
+        );
+      }
+
+      if (
+        input.requiresBuild
+      ) {
+        groups.add(
+          "roblox-building",
+        );
+      }
+
+      if (
+        input.requiresTesting ||
+        input.requiresVerification
+      ) {
+        groups.add(
+          "roblox-execution",
+        );
+      }
+    }
+
+    if (
+      input.needsFiles
+    ) {
+      groups.add(
+        "filesystem",
+      );
+    }
+
+    if (
+      input.needsTerminal
+    ) {
+      groups.add(
+        "terminal",
+      );
+    }
+
+    if (
+      groups.size === 0
+    ) {
+      groups.add("general");
+    }
+
+    return [...groups];
+  }
+
+  /* ==========================================================================
+   * TOOL EXECUTION
+   * ======================================================================== */
+
+  private async executeToolCalls(
+    state: AgentState,
+    toolCalls: AIToolCall[],
+  ): Promise<void> {
+    for (
+      const toolCall of toolCalls
+    ) {
+      if (
+        state.totalToolCalls >=
+        MAX_TOTAL_TOOL_CALLS
+      ) {
+        break;
+      }
+
+      const name =
+        toolCall.function.name;
+
+      const input =
+        (toolCall.function.arguments ??
+          {}) as Record<
+          string,
+          unknown
+        >;
+
+      state.totalToolCalls++;
+
+      const executionId =
+        crypto.randomUUID();
+
+      const startedAt =
+        new Date().toISOString();
+
+      this.printToolCall(
+        name,
+        input,
+        state.phase,
+      );
+
+      if (
+        !this.tools.has(name)
+      ) {
+        const error =
+          `Unknown tool: ${name}`;
+
+        this.recordToolFailure(
+          state,
+          executionId,
+          name,
+          input,
+          error,
+          startedAt,
+        );
+
+        state.messages.push({
+          role: "tool",
+
+          content:
+            JSON.stringify({
+              success: false,
+
+              error,
+            }),
+
+          toolCallId:
+            toolCall.id,
+        });
+
+        continue;
+      }
+
+      /*
+       * Block a verbatim repeat of a call that already failed with the
+       * exact same MODEL-PROVIDED arguments (pre-injection). This is
+       * generic — it applies to any tool, not a specific one.
+       */
+      const signature =
+        `${name}:${this.stableStringify(
+          input,
+        )}`;
+
+      if (
+        state.failedCallSignatures.has(
+          signature,
+        )
+      ) {
+        const error =
+          `Tool "${name}" was blocked because it already failed with these exact same arguments. Do not repeat a failed call unchanged — use a discovery tool to obtain any missing/incorrect value, then retry with corrected arguments.`;
+
+        this.recordToolFailure(
+          state,
+          executionId,
+          name,
+          input,
+          error,
+          startedAt,
+        );
+
+        state.messages.push({
+          role: "tool",
+
+          content:
+            JSON.stringify({
+              success: false,
+
+              error,
+
+              blocked:
+                "duplicate-failed-call",
+            }),
+
+          toolCallId:
+            toolCall.id,
+        });
+
+        continue;
+      }
+
+      /*
+       * Hard safety gate for an explicit, UNSCOPED "do not modify/
+       * build/change anything" instruction. Independent of intent
+       * classification (requiresBuild) so it still holds even if that
+       * classification is ever wrong — the user's explicit words are
+       * the final authority here, not a keyword heuristic. A scoped
+       * protection (plan.protectedTargets) does NOT trigger this gate
+       * — see the system prompt for how that's surfaced instead.
+       */
+      if (
+        state.plan.explicitReadOnly &&
+        (
+          this.tools.getGroup(name) ===
+            "roblox-building" ||
+          this.tools.isDestructiveTool(
+            name,
+          ) ||
+          name === "write_file"
+        )
+      ) {
+        const error =
+          `Tool "${name}" was blocked because the user explicitly requested no modifications ("do not modify anything" or equivalent).`;
+
+        this.recordToolFailure(
+          state,
+          executionId,
+          name,
+          input,
+          error,
+          startedAt,
+        );
+
+        state.messages.push({
+          role: "tool",
+
+          content:
+            JSON.stringify({
+              success: false,
+
+              error,
+
+              blocked:
+                "explicit-read-only-policy",
+            }),
+
+          toolCallId:
+            toolCall.id,
+        });
+
+        continue;
+      }
+
+      if (
+        this.tools.isDestructiveTool(
+          name,
+        ) &&
+        !state.plan.destructiveRequested
+      ) {
+        const error =
+          `Destructive tool "${name}" was blocked because the user's request did not explicitly authorize destructive changes.`;
+
+        this.recordToolFailure(
+          state,
+          executionId,
+          name,
+          input,
+          error,
+          startedAt,
+        );
+
+        state.messages.push({
+          role: "tool",
+
+          content:
+            JSON.stringify({
+              success: false,
+
+              error,
+
+              blocked:
+                "destructive-operation-policy",
+            }),
+
+          toolCallId:
+            toolCall.id,
+        });
+
+        continue;
+      }
+
+      /*
+       * ------------------------------------------------------------
+       * NORMALIZE + EXECUTE, WITH ONE STALE-SESSION RETRY
+       * ------------------------------------------------------------
+       */
+
+      const discoveryToolName =
+        this.findStudioDiscoveryToolName();
+
+      const firstAttempt =
+        this.normalizeToolArguments(
+          name,
+          input,
+          state,
+        );
+
+      let executedInput: Record<
+        string,
+        unknown
+      > = firstAttempt.normalized;
+
+      let studioIdInjected =
+        firstAttempt.studioIdInjected;
+
+      this.printNormalizedArguments(
+        name,
+        input,
+        executedInput,
+        studioIdInjected,
+      );
+
+      let result =
+        await this.tools.execute(
+          name,
+          executedInput,
+          {
+            sessionId:
+              this.sessionId,
+          },
+        );
+
+      let staleRecoveryAttempted = false;
+      let staleRecoverySucceeded =
+        false;
+
+      const isRobloxTool =
+        (
+          this.tools.getGroup(
+            name,
+          ) ?? ""
+        ).startsWith("roblox");
+
+      if (
+        !result.success &&
+        isRobloxTool &&
+        name !== discoveryToolName &&
+        looksLikeStaleStudioError(
+          result.error,
+        )
+      ) {
+        staleRecoveryAttempted = true;
+
+        this.printStaleStudioRecoveryAttempt(
+          name,
+          result.error,
+        );
+
+        state.studioContext = {
+          status: "unresolved",
+        };
+
+        await this.ensureRobloxStudioContext(
+          state,
+        );
+
+        if (
+          state.studioContext
+            .status ===
+            "resolved" &&
+          state.studioContext.studioId
+        ) {
+          const retryAttempt =
+            this.normalizeToolArguments(
+              name,
+              input,
+              state,
+            );
+
+          executedInput =
+            retryAttempt.normalized;
+
+          studioIdInjected =
+            retryAttempt.studioIdInjected;
+
+          result =
+            await this.tools.execute(
+              name,
+              executedInput,
+              {
+                sessionId:
+                  this.sessionId,
+              },
+            );
+
+          staleRecoverySucceeded =
+            result.success;
+        }
+
+        this.printStaleStudioRecoveryResult(
+          staleRecoverySucceeded,
+        );
+      }
+
+      const finishedAt =
+        new Date().toISOString();
+
+      const execution: ToolExecution =
+        {
+          id: executionId,
+
+          /*
+           * Stored as the model's original request for readability in
+           * execution history / evidence text; the actually-executed,
+           * normalized arguments are logged separately (see
+           * printNormalizedArguments) and used for the real call.
+           */
+          name,
+
+          input,
+
+          success:
+            result.success,
+
+          data:
+            result.data,
+
+          error:
+            result.error,
+
+          iteration:
+            state.iterations,
+
+          phase:
+            state.phase,
+
+          startedAt,
+
+          finishedAt,
+        };
+
+      state.executedTools.push(
+        execution,
+      );
+
+      if (
+        result.success
+      ) {
+        state.consecutiveFailures = 0;
+      } else {
+        state.consecutiveFailures++;
+
+        state.failedCallSignatures.add(
+          signature,
+        );
+      }
+
+      const serialized =
+        this.serializeToolResult(
+          result,
+        );
+
+      state.messages.push({
+        role: "tool",
+
+        content:
+          serialized,
+
+        toolCallId:
+          toolCall.id,
+        });
+
+      this.printToolResult(
+        name,
+        result,
+      );
+
+      if (
+        state.consecutiveFailures >=
+        MAX_CONSECUTIVE_FAILURES
+      ) {
+        state.phase =
+          "debug";
+
+        state.messages.push({
+          role: "user",
+
+          content: `
+Multiple tool executions have failed consecutively.
+
+Do not repeat the same operation blindly.
+
+Switch to diagnosis:
+1. Inspect the current state.
+2. Determine why the operation failed.
+3. Choose a different or corrected approach.
+4. Retry only after understanding the failure.
+`,
+        });
+
+        break;
+      }
+    }
+  }
+
+  private recordToolFailure(
+    state: AgentState,
+    executionId: string,
+    name: string,
+    input: unknown,
+    error: string,
+    startedAt: string,
+  ): void {
+    state.failedCallSignatures.add(
+      `${name}:${this.stableStringify(
+        input,
+      )}`,
+    );
+
+    state.executedTools.push({
+      id: executionId,
+
+      name,
+
+      input,
+
+      success: false,
+
+      error,
+
+      iteration:
+        state.iterations,
+
+      phase:
+        state.phase,
+
+      startedAt,
+
+      finishedAt:
+        new Date().toISOString(),
+    });
+
+    state.consecutiveFailures++;
+
+    state.errors.push({
+      phase:
+        state.phase,
+
+      message:
+        error,
+
+      tool:
+        name,
+
+      recoverable: true,
+
+      timestamp:
+        new Date().toISOString(),
+    });
+
+    this.printToolResult(
+      name,
+      {
+        success: false,
+        error,
+      },
+    );
+  }
+
+  /* ==========================================================================
+   * VERIFICATION ENGINE
+   * ======================================================================== */
+
+  private async verifyTask(
+    state: AgentState,
+    provider: AIProvider,
+    model: string,
+  ): Promise<VerificationState> {
+    state.verification.attempted =
+      true;
+
+    const verificationTools =
+      this.tools.getAIDefinitions(
+        [
+          "roblox-inspection",
+          "roblox-execution",
+        ],
+        {
+          includeDescriptions: true,
+
+          sort: true,
+
+          maxTools: 40,
+        },
+      );
+
+    if (
+      verificationTools.length === 0
+    ) {
+      return {
+        required: true,
+
+        attempted: true,
+
+        passed: false,
+
+        checks: [],
+
+        evidence: [],
+
+        reason:
+          "No Roblox verification tools are available.",
+      };
+    }
+
+    const verificationMessages:
+      AIMessage[] = [
+        {
+          role: "system",
+
+          content: `
+You are the verification engine for an autonomous Roblox development agent.
+
+You are NOT a normal chatbot.
+
+Your job is to actually accomplish the user's objective using the tools available to you.
+
+==================================================
+CORE RULES
+==================================================
+
+1. ACT, DON'T JUST EXPLAIN.
+   If a tool can perform the requested operation, use it.
+
+2. NEVER FAKE TOOL CALLS.
+   JSON written inside assistant content is not a tool call.
+
+3. NEVER CLAIM SUCCESS WITHOUT EVIDENCE.
+   Creating a file is not proof that Roblox changed.
+   A successful create operation is not automatically proof of final functionality.
+   A model's own statement is never sufficient evidence.
+
+4. INSPECT BEFORE SIGNIFICANT CHANGES.
+   Understand existing project structure before modifying it.
+
+5. AVOID DUPLICATES.
+   Reuse appropriate existing objects/systems when possible.
+
+6. PREFER ROBLOX TOOLS FOR ROBLOX WORK.
+   Filesystem operations are not a substitute for changing Roblox Studio.
+
+7. TEST WHEN RUNTIME BEHAVIOR MATTERS.
+
+8. VERIFY BEFORE FINISHING.
+   Required success criteria must have concrete supporting evidence.
+
+9. RECOVER FROM FAILURES.
+   Diagnose tool errors instead of repeating the same failed operation blindly.
+
+10. MAKE THE SMALLEST SAFE CHANGE.
+    Do not restructure unrelated parts of the project.
+
+==================================================
+ROBLOX RULES
+==================================================
+
+For Roblox tasks:
+
+- Roblox Studio is the target environment.
+- Use inspection tools to understand the current state.
+- Use building tools to make actual Studio changes.
+- Use execution/playtest tools to validate behavior.
+- Use output/error tools to diagnose runtime failures.
+- Never assume an object exists.
+- Never assume a script executed correctly.
+- Never confuse source code on disk with live Roblox state.
+- studio_id is handled automatically by the runtime — you do not need
+  to discover, remember, or pass it yourself.
+
+==================================================
+DESTRUCTIVE OPERATIONS
+==================================================
+
+Destructive operations include deleting, destroying, wiping, clearing, resetting, replacing, or shutting down project content.
+
+Only perform destructive operations when the user's request clearly authorizes them.
+
+Do not interpret a general request such as "build X" as permission to delete unrelated content.
+
+==================================================
+CURRENT TASK
+==================================================
+
+Intent:
+${state.plan.intent}
+
+Capability:
+${state.plan.capability}
+
+Objective:
+${state.plan.objective}
+
+Needs Roblox:
+${state.plan.needsRoblox}
+
+Needs Build:
+${state.plan.requiresBuild}
+
+Needs Testing:
+${state.plan.requiresTesting}
+
+Needs Verification:
+${state.plan.requiresVerification}
+
+Needs Files:
+${state.plan.needsFiles}
+
+Needs Terminal:
+${state.plan.needsTerminal}
+
+Explicit Read-Only (do not modify/build/create anything):
+${state.plan.explicitReadOnly}
+${
+  state.plan.protectedTargets.length >
+  0
+    ? `\nProtected (do not modify, everything else is allowed):\n${state.plan.protectedTargets
+        .map(
+          (target) => `- ${target}`,
+        )
+        .join("\n")}\n`
+    : ""
+}
+Roblox Studio Context:
+${this.describeStudioContext(
+  state,
+)}
+
+==================================================
+SUCCESS CRITERIA
+==================================================
+
+${state.plan.successCriteria
+  .map(
+    (criterion) =>
+      `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: ${criterion.description}`,
+  )
+  .join("\n")}
+
+==================================================
+ALREADY ESTABLISHED IN THIS SESSION
+==================================================
+
+The main agent already ran the following tool calls before reaching
+verification. Their results are real evidence — reuse concrete values
+(such as IDs) from them instead of re-deriving or re-guessing. Only
+call a tool again if the current state may genuinely have changed
+since it ran.
+
+${
+  state.executedTools.filter(
+    (execution) => execution.success,
+  ).length > 0
+    ? state.executedTools
+        .filter(
+          (execution) =>
+            execution.success,
+        )
+        .map(
+          (execution) =>
+            `- ${execution.name} → ${this.summarizeEvidence(
+              execution.data,
+            )}`,
+        )
+        .join("\n")
+    : "(no successful tool calls yet)"
+}
+
+==================================================
+EXECUTION STRATEGY
+==================================================
+
+Follow this lifecycle when appropriate:
+
+UNDERSTAND
+→ INSPECT
+→ PLAN
+→ BUILD
+→ EXECUTE
+→ TEST
+→ DEBUG
+→ VERIFY
+→ COMPLETE
+
+Do not skip verification merely because the last tool returned success.
+
+Do not provide a tutorial unless the user explicitly asks for instructions.
+
+If the requested task is possible with available tools, perform it.
+`,
+        },
+
+        {
+          role: "user",
+
+          content:
+            "Verify the task now, using the already-established results above wherever they are still sufficient.",
+        },
+      ];
+
+    const firstResponse =
+      await provider.chat({
+        model,
+
+        messages:
+          verificationMessages,
+
+        temperature: 0,
+
+        stream: false,
+
+        tools:
+          verificationTools,
+      });
+
+    const firstMessage =
+      firstResponse.message;
+
+    const calls =
+      firstMessage.toolCalls ??
+      [];
+
+    const evidence:
+      string[] = [];
+
+    const sourceTools:
+      string[] = [];
+
+    for (
+      const toolCall of calls
+    ) {
+      const toolName =
+        toolCall.function.name;
+
+      if (
+        !verificationTools.some(
+          (definition) =>
+            definition.function.name ===
+            toolName,
+        )
+      ) {
+        continue;
+      }
+
+      const rawArgs =
+        (toolCall.function
+          .arguments ??
+          {}) as Record<
+          string,
+          unknown
+        >;
+
+      const normalizedArgs =
+        this.normalizeToolArguments(
+          toolName,
+          rawArgs,
+          state,
+        ).normalized;
+
+      const result =
+        await this.tools.execute(
+          toolName,
+          normalizedArgs,
+          {
+            sessionId:
+              this.sessionId,
+          },
+        );
+
+      sourceTools.push(
+        toolName,
+      );
+
+      if (
+        result.success
+      ) {
+        evidence.push(
+          `${toolName}: ${this.summarizeEvidence(result.data)}`,
+        );
+      } else {
+        evidence.push(
+          `${toolName}: FAILED - ${this.truncate(
+            result.error ??
+              "Unknown error",
+            2000,
+          )}`,
+        );
+      }
+
+      verificationMessages.push({
+        role: "assistant",
+
+        content:
+          firstMessage.content ??
+          "",
+
+        toolCalls: [
+          toolCall,
+        ],
+      });
+
+      verificationMessages.push({
+        role: "tool",
+
+        content:
+          this.serializeToolResult(
+            result,
+          ),
+
+        toolCallId:
+          toolCall.id,
+      });
+    }
+
+    let finalResponse =
+      firstResponse;
+
+    if (
+      calls.length > 0
+    ) {
+      finalResponse =
+        await provider.chat({
+          model,
+
+          messages:
+            verificationMessages,
+
+          temperature: 0,
+
+          stream: false,
+
+          tools:
+            verificationTools,
+        });
+    }
+
+    const finalContent =
+      finalResponse.message.content
+        ?.trim() ?? "";
+
+    const checks =
+      this.extractVerificationChecks(
+        state,
+        finalContent,
+        evidence,
+        sourceTools,
+      );
+
+    const requiredChecks =
+      checks.filter(
+        (check) =>
+          state.plan.successCriteria.some(
+            (criterion) =>
+              criterion.required &&
+              criterion.id ===
+                check.id,
+          ),
+      );
+
+    const requiredCriteria =
+      state.plan.successCriteria.filter(
+        (criterion) =>
+          criterion.required,
+      );
+
+    const missingCriteria =
+      requiredCriteria.filter(
+        (criterion) =>
+          !checks.some(
+            (check) =>
+              check.id ===
+                criterion.id &&
+              check.passed,
+          ),
+      );
+
+    const passed =
+      requiredCriteria.length > 0
+        ? missingCriteria.length === 0 &&
+          this.hasConcreteEvidence(
+            evidence,
+          )
+        : this.interpretVerificationWithEvidence(
+            finalContent,
+            evidence,
+          );
+
+    const reason =
+      passed
+        ? "All required completion criteria have concrete supporting evidence."
+        : missingCriteria.length > 0
+          ? `Missing or unproven criteria: ${missingCriteria
+              .map(
+                (criterion) =>
+                  criterion.id,
+              )
+              .join(", ")}`
+          : finalContent ||
+            "Verification did not produce sufficient evidence.";
+
+    return {
+      required: true,
+
+      attempted: true,
+
+      passed,
+
+      checks:
+
+        requiredChecks.length > 0
+          ? checks
+          : checks,
+
+      evidence,
+
+      reason,
+    };
+  }
+
+  private extractVerificationChecks(
+    state: AgentState,
+    content: string,
+    evidence: string[],
+    sourceTools: string[],
+  ): VerificationCheck[] {
+    const normalized =
+      content.toLowerCase();
+
+    return state.plan.successCriteria.map(
+      (criterion) => {
+        const relevantEvidence =
+          evidence.filter(
+            (item) =>
+              this.evidenceRelevantToCriterion(
+                item,
+                criterion,
+              ),
+          );
+
+        const textClaimsSuccess =
+          this.textClaimsCriterionPassed(
+            normalized,
+            criterion,
+          );
+
+        const passed =
+          relevantEvidence.length > 0 &&
+          textClaimsSuccess;
+
+        return {
+          id:
+            criterion.id,
+
+          description:
+            criterion.description,
+
+          passed,
+
+          evidence:
+            relevantEvidence,
+
+          sourceTools,
+        };
+      },
+    );
+  }
+
+  private evidenceRelevantToCriterion(
+    evidence: string,
+    criterion: SuccessCriterion,
+  ): boolean {
+    const haystack =
+      `${evidence} ${criterion.description}`
+        .toLowerCase();
+
+    const words =
+      criterion.description
+        .toLowerCase()
+        .split(/\s+/)
+        .filter(
+          (word) =>
+            word.length >= 4,
+        )
+        .slice(0, 8);
+
+    const matches =
+      words.filter(
+        (word) =>
+          haystack.includes(
+            word,
+          ),
+      ).length;
+
+    return matches >= 1;
+  }
+
+  private textClaimsCriterionPassed(
+    normalizedContent: string,
+    criterion: SuccessCriterion,
+  ): boolean {
+    const id =
+      criterion.id.toLowerCase();
+
+    const description =
+      criterion.description.toLowerCase();
+
+    const relevant =
+      normalizedContent.includes(id) ||
+      normalizedContent.includes(
+        description,
+      );
+
+    if (
+      relevant &&
+      (
+        normalizedContent.includes(
+          "failed",
+        ) ||
+        normalizedContent.includes(
+          "missing",
+        ) ||
+        normalizedContent.includes(
+          "not found",
+        ) ||
+        normalizedContent.includes(
+          "does not exist",
+        ) ||
+        normalizedContent.includes(
+          "not complete",
+        )
+      )
+    ) {
+      return false;
+    }
+
+    return (
+      relevant ||
+      normalizedContent.includes(
+        "verified",
+      ) ||
+      normalizedContent.includes(
+        "confirmed",
+      ) ||
+      normalizedContent.includes(
+        "successfully",
+      ) ||
+      normalizedContent.includes(
+        "working",
+      ) ||
+      normalizedContent.includes(
+        "task is complete",
+      ) ||
+      normalizedContent.includes(
+        "task completed",
+      )
+    );
+  }
+
+  private hasConcreteEvidence(
+    evidence: string[],
+  ): boolean {
+    return evidence.some(
+      (item) =>
+        item.trim().length > 0 &&
+        !item.toLowerCase().includes(
+          "failed",
+        ),
+    );
+  }
+
+  private interpretVerificationWithEvidence(
+    content: string,
+    evidence: string[],
+  ): boolean {
+    if (
+      !this.hasConcreteEvidence(
+        evidence,
+      )
+    ) {
+      return false;
+    }
+
+    const normalized =
+      content.toLowerCase();
+
+    const failurePatterns = [
+      "not complete",
+      "not completed",
+      "does not exist",
+      "doesn't exist",
+      "missing",
+      "not found",
+      "failed",
+      "failure",
+      "unable to verify",
+      "cannot verify",
+      "could not verify",
+      "not verified",
+      "not working",
+      "doesn't work",
+      "doesnt work",
+    ];
+
+    if (
+      failurePatterns.some(
+        (pattern) =>
+          normalized.includes(
+            pattern,
+          ),
+      )
+    ) {
+      return false;
+    }
+
+    const successPatterns = [
+      "verified",
+      "confirmed",
+      "successfully",
+      "working",
+      "task is complete",
+      "task completed",
+    ];
+
+    return successPatterns.some(
+      (pattern) =>
+        normalized.includes(
+          pattern,
+        ),
+    );
+  }
+
+  /* ==========================================================================
+   * COMPLETION / RECOVERY
+   * ======================================================================== */
+
+  private requiresEvidenceBeforeCompletion(
+    state: AgentState,
+  ): boolean {
+    return (
+      state.plan.requiresVerification ||
+      state.plan.requiresBuild ||
+      state.plan.requiresTesting
+    );
+  }
+
+  /**
+   * General, plan-driven check for whether the task's own required
+   * categories (inspection/build/testing/verification) actually have
+   * evidence yet — independent of which specific tool the model chose.
+   * This is what closes the gap where a plan with
+   * requiresVerification=false (e.g. a pure inspection task) had no
+   * gate at all preventing completion right after a single failed
+   * tool call and an empty model response.
+   *
+   * Reuses the existing hasInspectionEvidence/hasBuildEvidence/
+   * hasTestingEvidence checks — no new evidence logic, no tool-specific
+   * reasoning.
+   */
+  private getUnsatisfiedRequirements(
+    state: AgentState,
+  ): string[] {
+    const unsatisfied: string[] = [];
+
+    if (
+      state.plan.requiresInspection &&
+      !this.hasInspectionEvidence(
+        state,
+      )
+    ) {
+      unsatisfied.push(
+        "inspection evidence (no successful inspection tool call yet)",
+      );
+    }
+
+    if (
+      state.plan.requiresBuild &&
+      !this.hasBuildEvidence(state)
+    ) {
+      unsatisfied.push(
+        "build evidence (no successful build tool call yet)",
+      );
+    }
+
+    if (
+      state.plan.requiresTesting &&
+      !this.hasTestingEvidence(
+        state,
+      )
+    ) {
+      unsatisfied.push(
+        "testing evidence (no successful runtime test yet)",
+      );
+    }
+
+    return unsatisfied;
+  }
+
+  private hasPotentiallyCompletedWork(
+    state: AgentState,
+  ): boolean {
+    return (
+      state.executedTools.length >
+      0
+    );
+  }
+
+  private hasInspectionEvidence(
+    state: AgentState,
+  ): boolean {
+    return state.executedTools.some(
+      (execution) =>
+        execution.success &&
+        execution.name
+          .toLowerCase()
+          .match(
+            /inspect|find|get|list|read|search|tree|output|error/,
+          ) !== null,
+    );
+  }
+
+  private hasBuildEvidence(
+    state: AgentState,
+  ): boolean {
+    return state.executedTools.some(
+      (execution) =>
+        execution.success &&
+        (
+          this.tools.getGroup(
+            execution.name,
+          ) ===
+            "roblox-building" ||
+          execution.name
+            .toLowerCase()
+            .match(
+              /create|build|insert|modify|update|set_|move_|clone_|duplicate_/,
+            ) !== null
+        ),
+    );
+  }
+
+  private hasTestingEvidence(
+    state: AgentState,
+  ): boolean {
+    return state.executedTools.some(
+      (execution) =>
+        execution.success &&
+        (
+          this.tools.getGroup(
+            execution.name,
+          ) ===
+            "roblox-execution" ||
+          execution.name
+            .toLowerCase()
+            .match(
+              /playtest|test|run_game|start_play|get_output|get_errors/,
+            ) !== null
+        ),
+    );
+  }
+
+  private buildRecoveryMessage(
+    state: AgentState,
+    verification: VerificationState,
+  ): string {
+    return `
+VERIFICATION FAILED.
+
+Reason:
+${verification.reason}
+
+Evidence collected:
+${verification.evidence.join("\n") || "No usable evidence."}
+
+Required success criteria:
+${state.plan.successCriteria
+  .filter(
+    (criterion) =>
+      criterion.required,
+  )
+  .map(
+    (criterion) =>
+      `- ${criterion.id}: ${criterion.description}`,
+  )
+  .join("\n")}
+
+Do not claim completion.
+
+Recover autonomously:
+1. Inspect the current state.
+2. Identify exactly what is missing or incorrect.
+3. Make the smallest safe correction.
+4. Test it when necessary.
+5. Verify it again.
+
+Do not repeat a failed operation without diagnosing why it failed.
+`;
+  }
+
+  private buildSuccessfulResponse(
+    state: AgentState,
+    fallbackContent: string,
+  ): string {
+    const criteria =
+      state.plan.successCriteria
+        .filter(
+          (criterion) =>
+            criterion.required,
+        )
+        .map(
+          (criterion) => {
+            const check =
+              state.verification.checks.find(
+                (item) =>
+                  item.id ===
+                  criterion.id,
+              );
+
+            return check?.passed
+              ? `✓ ${criterion.description}`
+              : `✓ ${criterion.description}`;
+          },
+        );
+
+    if (
+      criteria.length === 0
+    ) {
+      return (
+        fallbackContent ||
+        "Task completed and verified."
+      );
+    }
+
+    return `
+Task completed and verified.
+
+${criteria.join("\n")}
+`;
+  }
+
+  private buildFailureResponse(
+    state: AgentState,
+  ): string {
+    const failedTools =
+      state.executedTools
+        .filter(
+          (execution) =>
+            !execution.success,
+        )
+        .map(
+          (execution) =>
+            execution.name,
+        );
+
+    const uniqueFailedTools =
+      [...new Set(
+        failedTools,
+      )];
+
+    const reason =
+      state.studioContext.status ===
+        "unavailable" &&
+      state.studioContext.error
+        ? state.studioContext.error
+        : state.verification.reason ||
+          state.errors.at(-1)
+            ?.message ||
+          "Insufficient evidence.";
+
+    return `
+I could not honestly verify that the requested task was completed.
+
+Reason:
+${this.truncate(
+  reason,
+  MAX_ERROR_CHARS,
+)}
+${
+  uniqueFailedTools.length > 0
+    ? `\nFailed tools: ${uniqueFailedTools.join(", ")}`
+    : ""
+}
+
+No completion claim was made because the required result was not sufficiently verified.
+`;
+  }
+
+  private fail(
+    state: AgentState,
+    reason: string,
+    recoverable: boolean,
+  ): void {
+    state.failed = true;
+
+    state.phase = "failed";
+
+    state.errors.push({
+      phase:
+        state.phase,
+
+      message:
+        reason,
+
+      recoverable,
+
+      timestamp:
+        new Date().toISOString(),
+    });
+  }
+
+  /* ==========================================================================
+   * INTENT DETECTION
+   *
+   * These are now FALLBACK hints only.
+   * The execution engine does not trust them as
+   * proof of completion.
+   * ======================================================================== */
+
+  private detectCapability(
+  message: string,
+): ModelCapability {
+  const normalized = message.toLowerCase();
+
+  if (this.detectDebuggingIntent(normalized)) {
+    return "debugging";
+  }
+
+  if (this.detectBuildIntent(normalized)) {
+    return "coding";
+  }
+
+  if (this.detectPlanningIntent(normalized)) {
+    return "planning";
+  }
+
+  if (this.detectAnalysisIntent(normalized)) {
+    return "analysis";
+  }
+
+  if (this.detectTestingIntent(normalized)) {
+    return "analysis";
+  }
+
+  if (this.detectInspectionIntent(normalized)) {
+    return "analysis";
+  }
+
+  return "chat";
+}
+
+  private capabilityForIntent(
+  intent: TaskIntent,
+): ModelCapability {
+  switch (intent) {
+    case "debugging":
+      return "debugging";
+
+    case "planning":
+      return "planning";
+
+    case "analysis":
+      return "analysis";
+
+    case "testing":
+    case "inspection":
+      return "analysis";
+
+    case "coding":
+    case "building":
+      return "coding";
+
+    case "chat":
+    default:
+      return "chat";
+  }
+}
+
+  private detectRobloxIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "roblox",
+      "roblox studio",
+      "studio",
+      "workspace",
+      "player",
+      "character",
+      "npc",
+      "gui",
+      "screen gui",
+      "startergui",
+      "serverscriptservice",
+      "replicatedstorage",
+      "serverstorage",
+      "localscript",
+      "local script",
+      "luau",
+      "lua",
+      "remoteevent",
+      "remote event",
+      "remotefunction",
+      "remote function",
+      "terrain",
+      "gamepass",
+      "obby",
+      "part",
+      "model",
+      "instance",
+      "spawn",
+    ];
+
+    const buildVerbs = [
+      "build ",
+      "create ",
+      "make ",
+      "add ",
+      "generate ",
+      "construct ",
+      "place ",
+      "spawn ",
+      "insert ",
+      "modify ",
+      "change ",
+      "update ",
+      "design ",
+    ];
+
+    return (
+      patterns.some(
+        (pattern) =>
+          text.includes(pattern),
+      ) ||
+      buildVerbs.some(
+        (verb) =>
+          text.startsWith(verb),
+      )
+    );
+  }
+
+  private detectBuildIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "build ",
+      "create ",
+      "make ",
+      "add ",
+      "generate ",
+      "construct ",
+      "place ",
+      "spawn ",
+      "insert ",
+      "modify ",
+      "change ",
+      "update ",
+      "design ",
+      "implement ",
+      "setup ",
+      "set up ",
+      "implement a system",
+      "create a system",
+      "build a system",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectTestingIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "test",
+      "playtest",
+      "play test",
+      "run the game",
+      "run game",
+      "start game",
+      "start play",
+      "stop play",
+      "test the game",
+      "check if it works",
+      "does it work",
+      "verify",
+      "validate",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectDebuggingIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "fix",
+      "debug",
+      "bug",
+      "error",
+      "broken",
+      "not working",
+      "doesn't work",
+      "doesnt work",
+      "failed",
+      "failure",
+      "issue",
+      "problem",
+      "repair",
+      "crash",
+      "exception",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectInspectionIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "inspect",
+      "check",
+      "look at",
+      "find",
+      "search",
+      "show me",
+      "what exists",
+      "review",
+      "analyze the current",
+      "existing structure",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectPlanningIntent(
+    text: string,
+  ): boolean {
+    return [
+      "plan",
+      "roadmap",
+      "architecture",
+      "design the system",
+      "how should we structure",
+    ].some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectAnalysisIntent(
+    text: string,
+  ): boolean {
+    return [
+      "analyze",
+      "analyse",
+      "analysis",
+      "review",
+      "evaluate",
+      "explain",
+    ].some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectFileIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "file",
+      "folder",
+      "directory",
+      "filesystem",
+      "source code",
+      "package.json",
+      "tsconfig",
+      ".ts",
+      ".js",
+      ".lua",
+      "write code",
+      "edit code",
+      "read code",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectTerminalIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "run command",
+      "terminal",
+      "powershell",
+      "npm ",
+      "node ",
+      "git ",
+      "install ",
+      "execute command",
+      "shell",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  private detectDestructiveIntent(
+    text: string,
+  ): boolean {
+    const patterns = [
+      "delete",
+      "destroy",
+      "remove",
+      "wipe",
+      "clear",
+      "purge",
+      "reset",
+      "shutdown",
+      "replace everything",
+      "replace all",
+      "start over",
+      "remove all",
+      "delete all",
+      "destroy all",
+    ];
+
+    return patterns.some(
+      (pattern) =>
+        text.includes(pattern),
+    );
+  }
+
+  /* ==========================================================================
+   * SUCCESS CRITERIA
+   * ======================================================================== */
+
+  private buildSuccessCriteria(
+    input: {
+      message: string;
+  needsRoblox: boolean;
+  requiresInspection: boolean;
+  requiresBuild: boolean;
+  requiresTesting: boolean;
+  requiresVerification: boolean;
+  needsFiles: boolean;
+  needsTerminal: boolean;
+    },
+  ): SuccessCriterion[] {
+    const criteria:
+      SuccessCriterion[] = [];
+
+    criteria.push({
+      id: "objective",
+
+      description:
+        "The user's requested outcome exists or has been truthfully determined impossible.",
+
+      required: true,
+    });
+
+    if (
+      input.needsRoblox
+    ) {
+      criteria.push({
+        id: "roblox-state",
+
+        description:
+          "The requested Roblox Studio state is actually present.",
+
+        required:
+          input.requiresBuild ||
+          input.requiresTesting ||
+          input.requiresVerification ||
+          input.requiresInspection,
+      });
+    }
+
+    if (
+      input.requiresTesting
+    ) {
+      criteria.push({
+        id: "runtime",
+
+        description:
+          "The requested Roblox behavior has been runtime tested successfully.",
+
+        required: input.requiresTesting ||
+          input.requiresVerification,
+      });
+
+      criteria.push({
+        id: "runtime-errors",
+
+        description:
+          "The relevant runtime test does not contain blocking errors.",
+
+        required: input.requiresTesting ||
+          input.requiresVerification,
+      });
+    }
+
+    if (
+      input.needsFiles
+    ) {
+      criteria.push({
+        id: "files",
+
+        description:
+          "Requested source files exist with the intended contents.",
+
+        required: input.needsFiles ||
+          input.requiresVerification,
+      });
+    }
+
+    if (
+      input.needsTerminal
+    ) {
+      criteria.push({
+        id: "commands",
+
+        description:
+          "Requested commands execute successfully.",
+
+        required: input.needsTerminal ||
+          input.requiresVerification,
+      });
+    }
+
+    return criteria;
+  }
+
+  /* ==========================================================================
+   * INITIAL PROMPT
+   * ======================================================================== */
+
+  private createInitialMessages(
+    state: AgentState,
+  ): AIMessage[] {
+    return [
+      {
+        role: "system",
+
+        content:
+          this.buildSystemPrompt(
+            state,
+          ),
+      },
+
+      {
+        role: "user",
+
+        content:
+          state.task.userMessage,
+      },
+    ];
+  }
+
+  private buildSystemPrompt(
+    state: AgentState,
+  ): string {
+    return `
+You are an autonomous software engineering agent operating a local Roblox development environment.
+
+You are NOT a normal chatbot.
+
+Your job is to actually accomplish the user's objective using the tools available to you.
+
+==================================================
+CORE RULES
+==================================================
+
+1. ACT, DON'T JUST EXPLAIN.
+   If a tool can perform the requested operation, use it.
+
+2. NEVER FAKE TOOL CALLS.
+   JSON written inside assistant content is not a tool call.
+
+3. NEVER CLAIM SUCCESS WITHOUT EVIDENCE.
+   Creating a file is not proof that Roblox changed.
+   A successful create operation is not automatically proof of final functionality.
+   A model's own statement is never sufficient evidence.
+
+4. INSPECT BEFORE SIGNIFICANT CHANGES.
+   Understand existing project structure before modifying it.
+
+5. AVOID DUPLICATES.
+   Reuse appropriate existing objects/systems when possible.
+
+6. PREFER ROBLOX TOOLS FOR ROBLOX WORK.
+   Filesystem operations are not a substitute for changing Roblox Studio.
+
+7. TEST WHEN RUNTIME BEHAVIOR MATTERS.
+
+8. VERIFY BEFORE FINISHING.
+   Required success criteria must have concrete supporting evidence.
+
+9. RECOVER FROM FAILURES.
+   Diagnose tool errors instead of repeating the same failed operation blindly.
+
+10. MAKE THE SMALLEST SAFE CHANGE.
+    Do not restructure unrelated parts of the project.
+
+==================================================
+ROBLOX STUDIO SESSION
+==================================================
+
+studio_id is resolved and supplied automatically by the runtime for
+Roblox tools that need it. Call Roblox tools without worrying about
+studio_id — you do not need to discover it, remember it, or pass it
+yourself. If a Roblox tool still fails, the failure is about something
+else (bad arguments, the operation itself, etc.), not a missing
+session.
+
+Current status: ${this.describeStudioContext(state)}
+
+==================================================
+ROBLOX RULES
+==================================================
+
+For Roblox tasks:
+
+- Roblox Studio is the target environment.
+- Use inspection tools to understand the current state.
+- Use building tools to make actual Studio changes.
+- Use execution/playtest tools to validate behavior.
+- Use output/error tools to diagnose runtime failures.
+- Never assume an object exists.
+- Never assume a script executed correctly.
+- Never confuse source code on disk with live Roblox state.
+
+==================================================
+DESTRUCTIVE OPERATIONS
+==================================================
+
+Destructive operations include deleting, destroying, wiping, clearing, resetting, replacing, or shutting down project content.
+
+Only perform destructive operations when the user's request clearly authorizes them.
+
+Do not interpret a general request such as "build X" as permission to delete unrelated content.
+
+==================================================
+CURRENT TASK
+==================================================
+
+Intent:
+${state.plan.intent}
+
+Capability:
+${state.plan.capability}
+
+Objective:
+${state.plan.objective}
+
+Needs Roblox:
+${state.plan.needsRoblox}
+
+Needs Build:
+${state.plan.requiresBuild}
+
+Needs Testing:
+${state.plan.requiresTesting}
+
+Needs Verification:
+${state.plan.requiresVerification}
+
+Needs Files:
+${state.plan.needsFiles}
+
+Needs Terminal:
+${state.plan.needsTerminal}
+
+Explicit Read-Only (do not modify/build/create anything):
+${state.plan.explicitReadOnly}
+${
+  state.plan.protectedTargets.length >
+  0
+    ? `\nProtected (do not modify, everything else is allowed):\n${state.plan.protectedTargets
+        .map(
+          (target) => `- ${target}`,
+        )
+        .join("\n")}\n`
+    : ""
+}
+==================================================
+SUCCESS CRITERIA
+==================================================
+
+${state.plan.successCriteria
+  .map(
+    (criterion) =>
+      `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: ${criterion.description}`,
+  )
+  .join("\n")}
+
+==================================================
+EXECUTION STRATEGY
+==================================================
+
+Follow this lifecycle when appropriate:
+
+UNDERSTAND
+→ INSPECT
+→ PLAN
+→ BUILD
+→ EXECUTE
+→ TEST
+→ DEBUG
+→ VERIFY
+→ COMPLETE
+
+Do not skip verification merely because the last tool returned success.
+
+Do not provide a tutorial unless the user explicitly asks for instructions.
+
+If the requested task is possible with available tools, perform it.
+`;
+  }
+
+  /* ==========================================================================
+   * UTILITIES
+   * ======================================================================== */
+
+  private describeStudioContext(
+    state: AgentState,
+  ): string {
+    const context =
+      state.studioContext;
+
+    switch (context.status) {
+      case "not-needed":
+        return "Not needed for this task.";
+
+      case "resolved":
+        return `Resolved — studio_id=${context.studioId}${
+          context.studioName
+            ? ` (${context.studioName})`
+            : ""
+        }.`;
+
+      case "unavailable":
+        return `Unavailable — ${
+          context.error ??
+          "unknown reason"
+        }`;
+
+      case "unresolved":
+      default:
+        return "Not yet resolved.";
+    }
+  }
+
+  private serializeToolResult(
+    result: {
+      success: boolean;
+
+      data?: unknown;
+
+      error?: string;
+    },
+  ): string {
+    const payload = {
+      success:
+        result.success,
+
+      data:
+        result.data,
+
+      error:
+        result.error,
+    };
+
+    let serialized =
+      JSON.stringify(
+        payload,
+        null,
+        2,
+      );
+
+    if (
+      serialized.length >
+      MAX_TOOL_RESULT_CHARS
+    ) {
+      serialized =
+        serialized.slice(
+          0,
+          MAX_TOOL_RESULT_CHARS,
+        ) +
+        "\n...[tool result truncated]";
+    }
+
+    return serialized;
+  }
+
+  private summarizeEvidence(
+    data: unknown,
+  ): string {
+    if (
+      data === undefined ||
+      data === null
+    ) {
+      return "tool returned success with no data";
+    }
+
+    if (
+      typeof data === "string"
+    ) {
+      return this.truncate(
+        data,
+        2500,
+      );
+    }
+
+    try {
+      return this.truncate(
+        JSON.stringify(data),
+        2500,
+      );
+    } catch {
+      return String(data);
+    }
+  }
+
+  private trimMessageHistory(
+    state: AgentState,
+  ): void {
+    if (
+      state.messages.length <=
+      MAX_HISTORY_MESSAGES
+    ) {
+      return;
+    }
+
+    const systemMessages =
+      state.messages.filter(
+        (message) =>
+          message.role ===
+          "system",
+      );
+
+    const nonSystemMessages =
+      state.messages.filter(
+        (message) =>
+          message.role !==
+          "system",
+      );
+
+    const keep =
+      MAX_HISTORY_MESSAGES -
+      systemMessages.length;
+
+    state.messages = [
+      ...systemMessages.slice(
+        0,
+        1,
+      ),
+
+      ...nonSystemMessages.slice(
+        -keep,
+      ),
+    ];
+  }
+
+  /**
+   * Deterministic JSON.stringify (object keys sorted) so the same
+   * logical arguments always produce the same failed-call signature,
+   * regardless of key order.
+   */
+  private stableStringify(
+    value: unknown,
+  ): string {
+    const sort = (
+      input: unknown,
+    ): unknown => {
+      if (
+        Array.isArray(input)
+      ) {
+        return input.map(sort);
+      }
+
+      if (
+        input &&
+        typeof input === "object"
+      ) {
+        return Object.keys(
+          input as Record<
+            string,
+            unknown
+          >,
+        )
+          .sort()
+          .reduce(
+            (
+              accumulator: Record<
+                string,
+                unknown
+              >,
+              key,
+            ) => {
+              accumulator[key] =
+                sort(
+                  (
+                    input as Record<
+                      string,
+                      unknown
+                    >
+                  )[key],
+                );
+
+              return accumulator;
+            },
+            {},
+          );
+      }
+
+      return input;
+    };
+
+    try {
+      return JSON.stringify(
+        sort(value),
+      );
+    } catch {
+      return String(value);
+    }
+  }
+
+  private truncate(
+    value: string,
+    max: number,
+  ): string {
+    if (
+      value.length <= max
+    ) {
+      return value;
+    }
+
+    return (
+      value.slice(
+        0,
+        max,
+      ) +
+      "\n...[truncated]"
+    );
+  }
+
+  private errorMessage(
+    error: unknown,
+  ): string {
+    if (
+      error instanceof Error
+    ) {
+      return error.message;
+    }
+
+    return String(error);
+  }
+
+  /* ==========================================================================
+   * LOGGING
+   * ======================================================================== */
+
+  private printTaskHeader(
+    state: AgentState,
+  ): void {
+    console.log(
+      `\n🤖 Agent Task: ${state.task.id}`,
+    );
+
+    console.log(
+      `🎯 Capability: ${state.plan.capability}`,
+    );
+
+    console.log(
+      `📌 Intent: ${state.plan.intent}`,
+    );
+
+    console.log(
+      `📝 Request: ${state.task.userMessage}`,
+    );
+
+    console.log(
+      "\n🧭 PLAN",
+    );
+
+    console.log(
+      JSON.stringify(
+        state.plan,
+        null,
+        2,
+      ),
+    );
+  }
+
+  private printIteration(
+    state: AgentState,
+  ): void {
+    console.log(
+      `\n🔄 ITERATION ${state.iterations}/${MAX_ITERATIONS}`,
+    );
+
+    console.log(
+      `📍 Phase: ${state.phase}`,
+    );
+
+    console.log(
+      `🔧 Tool calls: ${state.totalToolCalls}/${MAX_TOTAL_TOOL_CALLS}`,
+    );
+  }
+
+  private printToolScope(
+    state: AgentState,
+    definitions: AIToolDefinition[],
+  ): void {
+    const groups =
+      new Set<string>();
+
+    for (
+      const definition of definitions
+    ) {
+      const group =
+        this.tools.getGroup(
+          definition.function.name,
+        );
+
+      if (group) {
+        groups.add(group);
+      }
+    }
+
+    console.log(
+      `🧰 Scope: ${[...groups].join(", ") || "none"}`,
+    );
+
+    console.log(
+      `🛠️ Tools exposed: ${definitions.length}`,
+    );
+  }
+
+  private printToolCall(
+    name: string,
+    input: unknown,
+    phase: AgentPhase,
+  ): void {
+    console.log(
+      `🔧 [${phase}] ${name}`,
+    );
+
+    console.log(
+      "📥 Model-provided input:",
+    );
+
+    console.log(
+      JSON.stringify(
+        input,
+        null,
+        2,
+      ),
+    );
+  }
+
+  private printNormalizedArguments(
+    name: string,
+    original: Record<
+      string,
+      unknown
+    >,
+    normalized: Record<
+      string,
+      unknown
+    >,
+    studioIdInjected: boolean,
+  ): void {
+    if (!studioIdInjected) {
+      return;
+    }
+
+    console.log(
+      `🧩 ${name}: studio_id injected automatically`,
+    );
+
+    console.log(
+      "📤 Executed arguments:",
+    );
+
+    console.log(
+      JSON.stringify(
+        normalized,
+        null,
+        2,
+      ),
+    );
+  }
+
+  private printStudioContext(
+    state: AgentState,
+  ): void {
+    console.log(
+      "\n🎬 ROBLOX CONTEXT",
+    );
+
+    console.log(
+      `   needsRoblox: ${state.plan.needsRoblox}`,
+    );
+
+    console.log(
+      `   status: ${state.studioContext.status}`,
+    );
+
+    if (state.studioContext.studioId) {
+      console.log(
+        `   studio_id: ${state.studioContext.studioId}`,
+      );
+
+      console.log(
+        `   studio_name: ${state.studioContext.studioName ?? "(unnamed)"}`,
+      );
+    }
+
+    if (
+      state.studioContext
+        .availableStudios &&
+      state.studioContext
+        .availableStudios.length > 1
+    ) {
+      console.log(
+        `   available studios: ${state.studioContext.availableStudios.length}`,
+      );
+    }
+
+    if (state.studioContext.error) {
+      console.log(
+        `   error: ${state.studioContext.error}`,
+      );
+    }
+  }
+
+  private printStudioDiscoveryAttempt(
+    toolName: string,
+    result: {
+      success: boolean;
+      error?: string;
+    },
+  ): void {
+    console.log(
+      `\n🔎 Studio discovery via ${toolName}: ${
+        result.success
+          ? "SUCCESS"
+          : "FAILED"
+      }`,
+    );
+
+    if (!result.success) {
+      console.log(
+        `   ${result.error}`,
+      );
+    }
+  }
+
+  private printStaleStudioRecoveryAttempt(
+    toolName: string,
+    error: string | undefined,
+  ): void {
+    console.log(
+      `\n♻️ Stale Studio session detected for ${toolName}: ${error}`,
+    );
+
+    console.log(
+      "   Invalidating context and rediscovering...",
+    );
+  }
+
+  private printStaleStudioRecoveryResult(
+    succeeded: boolean,
+  ): void {
+    console.log(
+      `   Retry after rediscovery: ${
+        succeeded ? "SUCCESS" : "still failed"
+      }`,
+    );
+  }
+
+  private printToolResult(
+    name: string,
+    result: {
+      success: boolean;
+
+      data?: unknown;
+
+      error?: string;
+    },
+  ): void {
+    console.log(
+      `📤 ${name}: ${
+        result.success
+          ? "SUCCESS"
+          : "FAILED"
+      }`,
+    );
+
+    if (
+      result.success
+    ) {
+      console.log(
+        JSON.stringify(
+          result.data,
+          null,
+          2,
+        ),
+      );
+    } else {
+      console.error(
+        result.error,
+      );
+    }
+  }
+}
+
+===== FILE: src\agent\tool-runtime.ts =====
+
+import crypto from "node:crypto";
+
+import type { AIToolCall } from "../providers/provider.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { ToolResult } from "../tools/types.js";
+import { classifyToolFailure } from "../tools/types.js";
+import {
+  prepareToolArguments,
+  toStructuredToolError,
+} from "../tools/tool-validator.js";
+import {
+  evidenceFromToolResult,
+  recordEvidence,
+} from "./evidence.js";
+import type { AgentExecutionState, ToolExecution } from "./execution-types.js";
+import { getToolPolicyBlock, policyBlockMessage } from "./policy.js";
+import { toolSignature } from "./serialize.js";
+import {
+  findStudioIdParameterKey,
+  looksLikeStaleStudioError,
+  normalizeRobloxToolArguments,
+} from "./studio-context.js";
+import {
+  findStudioDiscoveryToolName,
+  invalidateStudioContext,
+  resolveStudioContext,
+} from "./studio-resolver.js";
+
+export class ToolRuntime {
+  constructor(
+    private readonly registry: ToolRegistry,
+    private readonly sessionId: string,
+  ) {}
+
+  findDiscoveryToolName(): string | null {
+    return findStudioDiscoveryToolName(
+      this.registry.list().map((tool) => tool.name),
+    );
+  }
+
+  async ensureStudioContext(
+    state: AgentExecutionState,
+  ): Promise<void> {
+    if (!state.plan.needsRoblox) {
+      state.studioContext = { status: "not-needed" };
+      return;
+    }
+
+    state.studioContext = await resolveStudioContext(
+      state.studioContext,
+      {
+        findDiscoveryToolName: () => this.findDiscoveryToolName(),
+        execute: (name, input) =>
+          this.registry.execute(name, input, {
+            sessionId: this.sessionId,
+          }),
+      },
+    );
+
+    if (
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId
+    ) {
+      const evidence = evidenceFromToolResult({
+        toolName: this.findDiscoveryToolName() ?? "studio_discovery",
+        group: "roblox-inspection",
+        success: true,
+        data: {
+          studioId: state.studioContext.studioId,
+          studioName: state.studioContext.studioName,
+        },
+      });
+
+      if (evidence) {
+        recordEvidence(state, evidence);
+      }
+    }
+  }
+
+  async executeToolCalls(
+    state: AgentExecutionState,
+    toolCalls: AIToolCall[],
+    limits: { maxTotal: number; maxPerIteration: number },
+  ): Promise<void> {
+    for (const toolCall of toolCalls.slice(0, limits.maxPerIteration)) {
+      if (state.totalToolCalls >= limits.maxTotal) {
+        break;
+      }
+
+      state.totalToolCalls += 1;
+      await this.executeOne(state, toolCall);
+    }
+  }
+
+  async executeOne(
+    state: AgentExecutionState,
+    toolCall: AIToolCall,
+  ): Promise<ToolResult> {
+    const name = toolCall.function.name;
+    const rawInput = toolCall.function.arguments ?? {};
+    const startedAt = new Date().toISOString();
+    const executionId = crypto.randomUUID();
+
+    if (!this.registry.has(name)) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(name, "UNKNOWN", `Unknown tool: ${name}`, {
+          receivedArguments: rawInput,
+        }),
+        startedAt,
+      );
+    }
+
+    const signature = toolSignature(name, rawInput);
+
+    if (state.failedCallSignatures.has(signature)) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(
+          name,
+          "DUPLICATE",
+          `Tool "${name}" was blocked because it already failed with these exact same arguments.`,
+          {
+            blocked: "duplicate-failed-call",
+            receivedArguments: rawInput,
+          },
+        ),
+        startedAt,
+      );
+    }
+
+    const policy = getToolPolicyBlock(this.registry, name, state.plan);
+
+    if (policy) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(
+          name,
+          "PERMISSION",
+          policyBlockMessage(name, policy),
+          { blocked: policy, receivedArguments: rawInput },
+        ),
+        startedAt,
+      );
+    }
+
+    const prepared = prepareToolArguments(this.registry, name, rawInput);
+    let args = prepared.args;
+
+    const registered = this.registry.getRegistered(name);
+    const schema = prepared.schema;
+    const studioIdKey = findStudioIdParameterKey(schema?.properties);
+    const discoveryTool = this.findDiscoveryToolName();
+    const needsStudio =
+      Boolean(studioIdKey) ||
+      Boolean(registered?.requiresStudioContext);
+
+    if (
+      needsStudio &&
+      name !== discoveryTool &&
+      state.studioContext.status !== "resolved"
+    ) {
+      await this.ensureStudioContext(state);
+    }
+
+    if (
+      studioIdKey &&
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId &&
+      name !== discoveryTool
+    ) {
+      const injected = normalizeRobloxToolArguments(
+        args,
+        studioIdKey,
+        state.studioContext.studioId,
+      );
+      args = injected.normalized;
+    }
+
+    const afterInject = prepareToolArguments(this.registry, name, args);
+
+    if (
+      afterInject.validationError &&
+      afterInject.validationError.errorType === "MISSING_PREREQUISITE"
+    ) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        afterInject.validationError,
+        startedAt,
+      );
+    }
+
+    if (afterInject.validationError) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        afterInject.validationError,
+        startedAt,
+      );
+    }
+
+    args = afterInject.args;
+
+  let result = await this.registry.execute(name, args, {
+    sessionId: this.sessionId,
+  });
+
+  const staleEligible =
+    !result.success &&
+    name !== discoveryTool &&
+    (looksLikeStaleStudioError(result.error) ||
+      result.errorType === "STUDIO_DISCONNECTED") &&
+    !state.staleRetrySignatures.has(signature);
+
+  if (staleEligible) {
+    state.staleRetrySignatures.add(signature);
+    state.studioContext = invalidateStudioContext();
+    await this.ensureStudioContext(state);
+
+    if (
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId
+    ) {
+      const retryArgs = normalizeRobloxToolArguments(
+        afterInject.args,
+        studioIdKey,
+        state.studioContext.studioId,
+      ).normalized;
+
+      result = await this.registry.execute(name, retryArgs, {
+        sessionId: this.sessionId,
+      });
+
+      // Keep the actual arguments used by the successful retry in the execution record.
+      args = retryArgs;
+    }
+  }
+
+  return this.finish(
+    state,
+    executionId,
+    name,
+    rawInput,
+    args,
+    result,
+    startedAt,
+    signature,
+  );
+  }
+
+  private fail(
+    state: AgentExecutionState,
+    executionId: string,
+    name: string,
+    input: unknown,
+    result: ToolResult,
+    startedAt: string,
+  ): ToolResult {
+    const signature = toolSignature(name, input);
+    state.failedCallSignatures.add(signature);
+
+    const execution = this.toExecution(
+      executionId,
+      name,
+      input,
+      result,
+      startedAt,
+      state,
+    );
+
+    state.executedTools.push(execution);
+    state.failedTools.push(execution);
+    state.consecutiveFailures += 1;
+    state.errors.push({
+      phase: state.phase,
+      message: result.error ?? "Tool failed",
+      tool: name,
+      recoverable: result.errorType !== "PERMISSION",
+      timestamp: new Date().toISOString(),
+    });
+
+    return result;
+  }
+
+  private finish(
+    state: AgentExecutionState,
+    executionId: string,
+    name: string,
+    input: unknown,
+    executedInput: unknown,
+    result: ToolResult,
+    startedAt: string,
+    signature: string,
+  ): ToolResult {
+    const classified: ToolResult = result.success
+      ? result
+      : {
+          ...result,
+          errorType: classifyToolFailure(result.error, {
+            errorType: result.errorType,
+            blocked: result.blocked,
+          }),
+        };
+
+    const execution: ToolExecution = {
+      ...this.toExecution(
+        executionId,
+        name,
+        input,
+        classified,
+        startedAt,
+        state,
+      ),
+      executedInput,
+    };
+
+    state.executedTools.push(execution);
+
+    if (classified.success) {
+      state.successfulTools.push(execution);
+      state.consecutiveFailures = 0;
+
+      const evidence = evidenceFromToolResult({
+        toolName: name,
+        group: this.registry.getGroup(name),
+        success: true,
+        data: classified.data,
+      });
+
+      if (evidence) {
+        recordEvidence(state, evidence);
+      }
+
+      if (
+        evidence?.type === "BUILD_CREATED" &&
+        state.evidence.some(
+          (item) =>
+            item.type === "STUDIO_INSPECTED" ||
+            item.type === "WORKSPACE_INSPECTED",
+        )
+      ) {
+        recordEvidence(state, {
+          type: "BUILD_VERIFIED",
+          sourceTool: name,
+          timestamp: Date.now(),
+          summary: "Build succeeded after inspection context was established.",
+        });
+      }
+    } else {
+      state.failedTools.push(execution);
+      state.consecutiveFailures += 1;
+      state.failedCallSignatures.add(signature);
+      state.errors.push({
+        phase: state.phase,
+        message: classified.error ?? "Tool failed",
+        tool: name,
+        recoverable: classified.errorType !== "PERMISSION",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return classified;
+  }
+
+  private toExecution(
+    executionId: string,
+    name: string,
+    input: unknown,
+    result: ToolResult,
+    startedAt: string,
+    state: AgentExecutionState,
+  ): ToolExecution {
+    return {
+      id: executionId,
+      name,
+      input,
+      success: result.success,
+      data: result.data,
+      error: result.error,
+      errorType: result.errorType,
+      iteration: state.iteration,
+      phase: state.phase,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    };
+  }
+}
+
+===== FILE: src\agent\orchestrator.ts =====
+
+import {
+  AgentRegistry,
+  type AgentContext,
+} from "./agent-registry.js";
+
+import {
+  createAgentState,
+  isTaskCompleted,
+  isTaskFailed,
+  updateAgentState,
+  type AgentState,
+} from "./agent-state.js";
+
+import type {
+  AgentExecutionResult,
+  AgentPhase,
+} from "./agent-types.js";
+
+export interface OrchestratorOptions {
+  executeTool: (
+    toolName: string,
+    input?: unknown,
+  ) => Promise<unknown>;
+
+  maxIterations?: number;
+  maxConsecutiveFailures?: number;
+}
+
+export interface OrchestratorResult {
+  state: AgentState;
+  success: boolean;
+  message: string;
+}
+
+export class AgentOrchestrator {
+  private readonly registry: AgentRegistry;
+  private readonly executeTool: (
+    toolName: string,
+    input?: unknown,
+  ) => Promise<unknown>;
+
+  private readonly maxIterations: number;
+  private readonly maxConsecutiveFailures: number;
+
+  constructor(
+    registry: AgentRegistry,
+    options: OrchestratorOptions,
+  ) {
+    this.registry = registry;
+    this.executeTool = options.executeTool;
+
+    this.maxIterations =
+      options.maxIterations ?? 50;
+
+    this.maxConsecutiveFailures =
+      options.maxConsecutiveFailures ?? 3;
+  }
+
+  async run(
+    taskId: string,
+    userMessage: string,
+  ): Promise<OrchestratorResult> {
+    const state = createAgentState(
+      taskId,
+      userMessage,
+    );
+
+    updateAgentState(state, {
+      status: "running",
+    });
+
+    try {
+      while (
+        !isTaskCompleted(state) &&
+        !isTaskFailed(state)
+      ) {
+        if (
+          state.iteration >=
+          this.maxIterations
+        ) {
+          return this.fail(
+            state,
+            "Maximum agent iterations exceeded.",
+          );
+        }
+
+        if (
+          state.consecutiveFailures >=
+          this.maxConsecutiveFailures
+        ) {
+          return this.fail(
+            state,
+            "Maximum consecutive agent failures exceeded.",
+          );
+        }
+
+        state.iteration += 1;
+
+        const agent =
+          this.registry.findHandler(state);
+
+        if (!agent) {
+          return this.fail(
+            state,
+            `No agent can handle phase "${state.phase}".`,
+          );
+        }
+
+        state.currentAgent =
+          agent.role;
+
+        const context: AgentContext = {
+          state,
+
+          executeTool: async (
+            toolName,
+            input,
+          ) => {
+            return this.executeTool(
+              toolName,
+              input,
+            );
+          },
+        };
+
+        let result: AgentExecutionResult;
+
+        try {
+          result =
+            await agent.execute(
+              context,
+            );
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
+
+          result = {
+            success: false,
+            error: message,
+            recoverable: true,
+          };
+        }
+
+        if (!result.success) {
+          state.failed = false;
+
+          state.failures.push({
+            agent: agent.role,
+            phase: state.phase,
+            message:
+              result.error ??
+              result.message ??
+              "Agent execution failed.",
+            recoverable:
+              result.recoverable ?? true,
+            timestamp: Date.now(),
+          });
+
+          state.consecutiveFailures += 1;
+
+          if (
+            state.consecutiveFailures >=
+            this.maxConsecutiveFailures
+          ) {
+            return this.fail(
+              state,
+              result.error ??
+                result.message ??
+                "Agent execution failed.",
+            );
+          }
+
+          continue;
+        }
+
+        state.consecutiveFailures = 0;
+
+        this.applyNextPhase(
+          state,
+          result.nextPhase,
+        );
+
+        if (
+          state.phase === "complete"
+        ) {
+          state.completed = true;
+          state.failed = false;
+          state.status = "completed";
+          break;
+        }
+
+        if (
+          state.phase === "failed"
+        ) {
+          return this.fail(
+            state,
+            result.error ??
+              result.message ??
+              "Agent marked task as failed.",
+          );
+        }
+      }
+
+      if (
+        state.completed &&
+        !state.failed
+      ) {
+        state.status = "completed";
+
+        return {
+          state,
+          success: true,
+          message:
+            "Agent task completed successfully.",
+        };
+      }
+
+      return this.fail(
+        state,
+        state.failureReason ??
+          "Agent task did not complete.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      return this.fail(
+        state,
+        message,
+      );
+    }
+  }
+
+  private applyNextPhase(
+    state: AgentState,
+    nextPhase?: AgentPhase,
+  ): void {
+    if (!nextPhase) {
+      return;
+    }
+
+    updateAgentState(state, {
+      phase: nextPhase,
+    });
+  }
+
+  private fail(
+    state: AgentState,
+    reason: string,
+  ): OrchestratorResult {
+    updateAgentState(state, {
+      status: "failed",
+      failed: true,
+      completed: false,
+      phase: "failed",
+      failureReason: reason,
+    });
+
+    return {
+      state,
+      success: false,
+      message: reason,
+    };
+  }
+}
+
+===== FILE: src\agent\plan.ts =====
+
+import type { ModelCapability } from "../router/model-router.js";
+import type { ToolGroup } from "../tools/registry.js";
+import {
+  detectFullReadOnlyIntent,
+  detectScopedProtectionTargets,
+} from "./studio-context.js";
+import type {
+  AgentPlan,
+  SuccessCriterion,
+  TaskIntent,
+} from "./execution-types.js";
+
+export function createInitialPlan(message: string): AgentPlan {
+  const normalized = message.toLowerCase();
+
+  const needsRoblox = detectRobloxIntent(normalized);
+  const needsFiles = detectFileIntent(normalized);
+  const needsTerminal = detectTerminalIntent(normalized);
+
+  const explicitReadOnly = detectFullReadOnlyIntent(normalized);
+  const protectedTargets = detectScopedProtectionTargets(normalized);
+
+  const requiresBuild = explicitReadOnly
+    ? false
+    : detectBuildIntent(normalized);
+
+  const requiresTesting = detectTestingIntent(normalized);
+  const debugging = detectDebuggingIntent(normalized);
+  const planning = detectPlanningIntent(normalized);
+  const analysis = detectAnalysisIntent(normalized);
+  const inspection = detectInspectionIntent(normalized);
+
+  const intent: TaskIntent = debugging
+    ? "debugging"
+    : requiresBuild
+      ? "building"
+      : requiresTesting
+        ? "testing"
+        : inspection
+          ? "inspection"
+          : needsFiles
+            ? "coding"
+            : planning
+              ? "planning"
+              : analysis
+                ? "analysis"
+                : "chat";
+
+  const capability = capabilityForIntent(intent);
+
+  /*
+   * Any Roblox-related request may need to inspect the live Studio state.
+   *
+   * This is intentionally broader than build/test/debug requests.
+   *
+   * Examples:
+   *   "Are you connected to Roblox Studio?"
+   *   "Which Studio is connected?"
+   *   "What is currently open in Studio?"
+   *   "Create a house."
+   *
+   * All of these need access to Roblox inspection tools.
+   */
+  const requiresInspection = needsRoblox;
+
+  /*
+   * Verification is still reserved for operations where we need to prove
+   * that a build/test/debug operation actually worked.
+   */
+  const requiresVerification =
+    needsRoblox &&
+    (requiresBuild || requiresTesting || debugging);
+
+  const preferredToolGroups = resolveToolGroups({
+    needsRoblox,
+    needsFiles,
+    needsTerminal,
+    requiresInspection,
+    requiresBuild,
+    requiresTesting,
+    requiresVerification,
+  });
+
+  return {
+    intent,
+    capability,
+    objective: message,
+
+    needsRoblox,
+    needsFiles,
+    needsTerminal,
+
+    requiresInspection,
+    requiresBuild,
+    requiresTesting,
+    requiresVerification,
+
+    destructiveRequested: detectDestructiveIntent(normalized),
+    explicitReadOnly,
+    protectedTargets,
+
+    successCriteria: buildSuccessCriteria({
+      needsRoblox,
+      requiresInspection,
+      requiresBuild,
+      requiresTesting,
+      requiresVerification,
+      needsFiles,
+      needsTerminal,
+    }),
+
+    preferredToolGroups,
+
+    reason: needsRoblox
+      ? "The task targets Roblox Studio or Roblox development."
+      : "The task does not require direct Roblox execution.",
+  };
+}
+
+export function detectCapability(message: string): ModelCapability {
+  return createInitialPlan(message).capability;
+}
+
+export function capabilityForIntent(intent: TaskIntent): ModelCapability {
+  switch (intent) {
+    case "debugging":
+      return "debugging";
+
+    case "planning":
+      return "planning";
+
+    case "analysis":
+    case "testing":
+    case "inspection":
+      return "analysis";
+
+    case "coding":
+    case "building":
+      return "coding";
+
+    default:
+      return "chat";
+  }
+}
+
+export function detectRobloxIntent(text: string): boolean {
+  const patterns = [
+    "roblox",
+    "studio",
+    "workspace",
+    "player",
+    "character",
+    "npc",
+    "gui",
+    "startergui",
+    "serverscriptservice",
+    "replicatedstorage",
+    "serverstorage",
+    "localscript",
+    "local script",
+    "luau",
+    "lua",
+    "remoteevent",
+    "remote event",
+    "remotefunction",
+    "remote function",
+    "terrain",
+    "gamepass",
+    "obby",
+    "part",
+    "model",
+    "instance",
+    "spawn",
+    "bed",
+    "house",
+  ];
+
+  const buildVerbs = [
+    "build ",
+    "create ",
+    "make ",
+    "add ",
+    "generate ",
+    "construct ",
+    "place ",
+    "spawn ",
+    "insert ",
+  ];
+
+  return (
+    patterns.some((pattern) => text.includes(pattern)) ||
+    buildVerbs.some((verb) => text.startsWith(verb))
+  );
+}
+
+export function detectBuildIntent(text: string): boolean {
+  return [
+    "build ",
+    "create ",
+    "make ",
+    "add ",
+    "generate ",
+    "construct ",
+    "place ",
+    "spawn ",
+    "insert ",
+    "modify ",
+    "change ",
+    "update ",
+    "design ",
+    "implement ",
+    "setup ",
+    "set up ",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectTestingIntent(text: string): boolean {
+  return [
+    "playtest",
+    "play test",
+    "run the game",
+    "run game",
+    "start game",
+    "start play",
+    "stop play",
+    "test the game",
+    "check if it works",
+    "does it work",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectDebuggingIntent(text: string): boolean {
+  return [
+    "fix",
+    "debug",
+    "bug",
+    "error",
+    "broken",
+    "not working",
+    "doesn't work",
+    "doesnt work",
+    "repair",
+    "crash",
+    "exception",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectInspectionIntent(text: string): boolean {
+  return [
+    "inspect",
+    "look at",
+    "find",
+    "search",
+    "show me",
+    "what exists",
+    "existing structure",
+    "analyze the current",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectPlanningIntent(text: string): boolean {
+  return [
+    "plan",
+    "roadmap",
+    "architecture",
+    "design the system",
+    "how should we structure",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectAnalysisIntent(text: string): boolean {
+  return [
+    "analyze",
+    "analyse",
+    "analysis",
+    "evaluate",
+    "explain",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectFileIntent(text: string): boolean {
+  return [
+    "file",
+    "folder",
+    "directory",
+    "filesystem",
+    "source code",
+    "package.json",
+    "tsconfig",
+    ".ts",
+    ".js",
+    "write code",
+    "edit code",
+    "read code",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectTerminalIntent(text: string): boolean {
+  return [
+    "run command",
+    "terminal",
+    "powershell",
+    "npm ",
+    "node ",
+    "git ",
+    "execute command",
+    "shell",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function detectDestructiveIntent(text: string): boolean {
+  return [
+    "delete",
+    "destroy",
+    "remove",
+    "wipe",
+    "clear",
+    "purge",
+    "reset",
+    "shutdown",
+    "replace everything",
+    "replace all",
+    "start over",
+    "remove all",
+    "delete all",
+    "destroy all",
+  ].some((pattern) => text.includes(pattern));
+}
+
+export function resolveToolGroups(input: {
+  needsRoblox: boolean;
+  needsFiles: boolean;
+  needsTerminal: boolean;
+  requiresInspection: boolean;
+  requiresBuild: boolean;
+  requiresTesting: boolean;
+  requiresVerification: boolean;
+}): ToolGroup[] {
+  const groups = new Set<ToolGroup>();
+
+  /*
+   * Roblox inspection is the base Roblox capability.
+   *
+   * This means even a simple status/connection question can use:
+   *   - roblox_get_studio_state
+   *   - roblox_list_roblox_studios
+   *   - roblox_inspect_instance
+   *   - roblox_search_game_tree
+   *   etc.
+   */
+  if (input.needsRoblox) {
+    groups.add("roblox-inspection");
+
+    if (input.requiresBuild) {
+      groups.add("roblox-building");
+    }
+
+    if (input.requiresTesting || input.requiresVerification) {
+      groups.add("roblox-execution");
+    }
+  }
+
+  if (input.needsFiles) {
+    groups.add("filesystem");
+  }
+
+  if (input.needsTerminal) {
+    groups.add("terminal");
+  }
+
+  if (groups.size === 0) {
+    groups.add("general");
+  }
+
+  return [...groups];
+}
+
+function buildSuccessCriteria(input: {
+  needsRoblox: boolean;
+  requiresInspection: boolean;
+  requiresBuild: boolean;
+  requiresTesting: boolean;
+  requiresVerification: boolean;
+  needsFiles: boolean;
+  needsTerminal: boolean;
+}): SuccessCriterion[] {
+  const criteria: SuccessCriterion[] = [
+    {
+      id: "objective",
+      description:
+        "The user's requested outcome exists or has been truthfully determined impossible.",
+      required: true,
+    },
+  ];
+
+  if (input.needsRoblox) {
+    criteria.push({
+      id: "roblox-state",
+      description:
+        "The requested Roblox Studio state is actually present or has been truthfully inspected.",
+      required:
+        input.requiresBuild ||
+        input.requiresTesting ||
+        input.requiresVerification ||
+        input.requiresInspection,
+    });
+  }
+
+  if (input.requiresTesting) {
+    criteria.push({
+      id: "runtime",
+      description:
+        "The requested Roblox behavior has been runtime tested successfully.",
+      required: true,
+    });
+  }
+
+  if (input.needsFiles) {
+    criteria.push({
+      id: "files",
+      description:
+        "Requested source files exist with the intended contents.",
+      required: true,
+    });
+  }
+
+  if (input.needsTerminal) {
+    criteria.push({
+      id: "commands",
+      description: "Requested commands execute successfully.",
+      required: true,
+    });
+  }
+
+  return criteria;
+}
+
+===== FILE: src\agent\studio-context.ts =====
+
+/**
+ * Pure, dependency-free helpers for Roblox Studio session/context
+ * resolution and related intent parsing.
+ *
+ * Kept deliberately free of ToolRegistry/Agent coupling so every
+ * function here can be unit tested in isolation (see
+ * studio-context.test.ts) without spinning up a model provider or a
+ * real tool registry.
+ */
+
+export type RobloxStudioContextStatus =
+  | "not-needed"
+  | "unresolved"
+  | "resolved"
+  | "unavailable";
+
+export interface StudioCandidate {
+  id: string;
+  name?: string;
+}
+
+export interface RobloxStudioContext {
+  status: RobloxStudioContextStatus;
+  studioId?: string;
+  studioName?: string;
+  placeId?: string;
+  mode?: string;
+  discoveredAt?: number;
+  availableStudios?: StudioCandidate[];
+  error?: string;
+}
+
+/* ============================================================================
+ * STUDIO DISCOVERY RESULT PARSING
+ * ========================================================================== */
+
+/**
+ * Used when scanning a discovery tool's RESULT DATA for studio
+ * candidates. Broader than the schema pattern below (also accepts a
+ * bare "id") because that scan is scoped to a discovery tool's own
+ * result — it never runs over arbitrary unrelated tool output — so a
+ * generic "id" field there is safe to treat as a studio identifier.
+ */
+const STUDIO_ID_KEY_PATTERN = /^(studio_?id|id)$/i;
+
+/**
+ * Used when scanning an ARBITRARY tool's input SCHEMA to decide
+ * whether to auto-inject studio_id. Deliberately stricter than the
+ * pattern above — a bare "id" here could just as easily mean "the
+ * instance id to modify" on a completely unrelated tool, and
+ * injecting a studio_id into that would corrupt the call instead of
+ * fixing it.
+ */
+const STUDIO_ID_SCHEMA_KEY_PATTERN = /^(studio_?id)$/i;
+
+const STUDIO_NAME_KEY_PATTERN =
+  /^(studio_?name|name|title|place_?name)$/i;
+const ACTIVE_KEY_PATTERN =
+  /^(active|focused|current|is_?active|is_?focused|is_?current)$/i;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Recursively scans an arbitrary tool-result payload (shape unknown —
+ * it comes from a real MCP server we don't control) for
+ * studio-id-shaped fields, so the runtime doesn't need to hardcode the
+ * exact response shape of a specific discovery tool.
+ */
+export function extractStudioCandidates(
+  data: unknown,
+): StudioCandidate[] {
+  const results: StudioCandidate[] = [];
+
+  const visit = (node: unknown): void => {
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        visit(item);
+      }
+
+      return;
+    }
+
+    if (node && typeof node === "object") {
+      const obj = node as Record<string, unknown>;
+
+      const idKey = Object.keys(obj).find(
+        (key) => STUDIO_ID_KEY_PATTERN.test(key),
+      );
+
+      if (
+        idKey &&
+        typeof obj[idKey] === "string" &&
+        (obj[idKey] as string).length > 0
+      ) {
+        const id = obj[idKey] as string;
+
+        if (UUID_PATTERN.test(id) || id.length >= 8) {
+          const nameKey = Object.keys(obj).find(
+            (key) =>
+              STUDIO_NAME_KEY_PATTERN.test(key) &&
+              key.toLowerCase() !== idKey.toLowerCase(),
+          );
+
+          const name =
+            nameKey && typeof obj[nameKey] === "string"
+              ? (obj[nameKey] as string)
+              : undefined;
+
+          results.push({ id, name });
+        }
+      }
+
+      for (const value of Object.values(obj)) {
+        visit(value);
+      }
+    }
+  };
+
+  visit(data);
+
+  const seen = new Set<string>();
+
+  return results.filter((entry) => {
+    if (seen.has(entry.id)) {
+      return false;
+    }
+
+    seen.add(entry.id);
+
+    return true;
+  });
+}
+
+/**
+ * When multiple Studios are open, look for an explicit
+ * active/focused/current signal in the raw discovery payload before
+ * ever guessing. Returns null if no such signal exists — callers must
+ * NOT fall back to picking one arbitrarily.
+ */
+export function findActiveStudioCandidate(
+  data: unknown,
+  candidates: StudioCandidate[],
+): StudioCandidate | null {
+  let found: StudioCandidate | null = null;
+
+  const visit = (node: unknown): void => {
+    if (found) {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        visit(item);
+      }
+
+      return;
+    }
+
+    if (node && typeof node === "object") {
+      const obj = node as Record<string, unknown>;
+
+      const idKey = Object.keys(obj).find(
+        (key) => STUDIO_ID_KEY_PATTERN.test(key),
+      );
+
+      const activeKey = Object.keys(obj).find((key) =>
+        ACTIVE_KEY_PATTERN.test(key),
+      );
+
+      if (
+        idKey &&
+        activeKey &&
+        obj[activeKey] === true
+      ) {
+        const id = obj[idKey] as string;
+        const match = candidates.find((c) => c.id === id);
+
+        if (match) {
+          found = match;
+
+          return;
+        }
+      }
+
+      for (const value of Object.values(obj)) {
+        visit(value);
+      }
+    }
+  };
+
+  visit(data);
+
+  return found;
+}
+
+/* ============================================================================
+ * STALE SESSION DETECTION
+ * ========================================================================== */
+
+const STALE_STUDIO_ERROR_PATTERNS = [
+  /not connected/i,
+  /target is closed/i,
+  /target closed/i,
+  /session (is )?(closed|invalid|stale)/i,
+  /studio (is )?(disconnected|unreachable|closed)/i,
+  /invalid.*studio_?id/i,
+  /unreachable/i,
+];
+
+export function looksLikeStaleStudioError(
+  error: string | undefined,
+): boolean {
+  if (!error) {
+    return false;
+  }
+
+  return STALE_STUDIO_ERROR_PATTERNS.some((pattern) =>
+    pattern.test(error),
+  );
+}
+
+/* ============================================================================
+ * SCHEMA-DRIVEN ARGUMENT NORMALIZATION
+ * ========================================================================== */
+
+/**
+ * Finds the studio_id-shaped key in a tool's JSON-schema properties,
+ * so injection is driven by what the tool's ACTUAL schema declares
+ * rather than a hardcoded per-tool argument name.
+ */
+export function findStudioIdParameterKey(
+  schemaProperties: Record<string, unknown> | undefined,
+): string | null {
+  if (!schemaProperties) {
+    return null;
+  }
+
+  const key = Object.keys(schemaProperties).find((k) =>
+    STUDIO_ID_SCHEMA_KEY_PATTERN.test(k),
+  );
+
+  return key ?? null;
+}
+
+/**
+ * Injects the resolved studio_id into a tool call's arguments, but
+ * only when the tool's schema actually has a studio_id-shaped
+ * parameter and the model didn't already supply a non-empty value.
+ * Never overwrites an explicitly provided value.
+ */
+export function normalizeRobloxToolArguments(
+  args: Record<string, unknown>,
+  studioIdKey: string | null,
+  resolvedStudioId: string | undefined,
+): {
+  normalized: Record<string, unknown>;
+  studioIdInjected: boolean;
+} {
+  if (!studioIdKey || !resolvedStudioId) {
+    return { normalized: args, studioIdInjected: false };
+  }
+
+  const existing = args[studioIdKey];
+
+  const hasValidExisting =
+    typeof existing === "string" &&
+    existing.trim().length > 0;
+
+  if (hasValidExisting) {
+    return { normalized: args, studioIdInjected: false };
+  }
+
+  return {
+    normalized: {
+      ...args,
+      [studioIdKey]: resolvedStudioId,
+    },
+    studioIdInjected: true,
+  };
+}
+
+/* ============================================================================
+ * READ-ONLY / SCOPED PROTECTION INTENT
+ * ========================================================================== */
+
+/**
+ * Detects an UNSCOPED "do not modify/build/change anything" style
+ * instruction — i.e. genuine full read-only mode.
+ *
+ * Deliberately narrower than matching any occurrence of "do not
+ * modify" anywhere in the message: that naive approach also matches
+ * "do not modify the existing house" in "build a bed but do not
+ * modify the existing house", which is a SCOPED protection alongside
+ * a real, permitted build request — not full read-only. Only a bare,
+ * unscoped negation ("anything"/"everything") or an explicit
+ * "read-only" phrase counts here.
+ */
+const FULL_READ_ONLY_PATTERNS = [
+  /\b(do not|don't|dont)\s+(modify|change|alter|edit|build|create|add)\s+(anything|everything)\b/,
+  /\bread[\s-]?only\b/,
+  /\bmake no changes\b/,
+  /\bno changes\b/,
+];
+
+export function detectFullReadOnlyIntent(
+  text: string,
+): boolean {
+  return FULL_READ_ONLY_PATTERNS.some((pattern) =>
+    pattern.test(text),
+  );
+}
+
+/**
+ * Detects a SCOPED protection target ("do not modify the existing
+ * house") that should be surfaced to the model as an instruction to
+ * respect, without converting the whole request into read-only mode.
+ *
+ * This is intentionally a lightweight heuristic, not full NL parsing:
+ * it captures the phrase following "do not <verb> the/my [existing]
+ * <noun phrase>" and hands it back as free text. The architecture has
+ * no way to resolve "the existing house" to a specific Roblox
+ * instance without semantic understanding, so this is surfaced as
+ * prompt-level guidance only — a soft protection, not a hard
+ * per-object tool block. That limitation is intentional and should
+ * stay documented rather than silently pretended away.
+ */
+const SCOPED_PROTECTION_PATTERN =
+  /\b(?:do not|don't|dont)\s+(?:modify|change|alter|touch|edit)\s+((?:the|my)\s+(?:existing\s+)?[a-z0-9][a-z0-9 _-]{1,40})/gi;
+
+export function detectScopedProtectionTargets(
+  text: string,
+): string[] {
+  const matches: string[] = [];
+
+  const pattern = new RegExp(
+    SCOPED_PROTECTION_PATTERN.source,
+    "gi",
+  );
+
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    matches.push(match[1].trim());
+  }
+
+  return matches;
+}
+
+===== FILE: src\agent\studio-resolver.ts =====
+
+import type { ToolResult } from "../tools/types.js";
+import {
+  extractStudioCandidates,
+  findActiveStudioCandidate,
+  type RobloxStudioContext,
+} from "./studio-context.js";
+
+export interface StudioDiscoveryPort {
+  findDiscoveryToolName(): string | null;
+  execute(
+    name: string,
+    input: Record<string, unknown>,
+  ): Promise<ToolResult>;
+}
+
+export function invalidateStudioContext(): RobloxStudioContext {
+  return { status: "unresolved" };
+}
+
+export async function resolveStudioContext(
+  current: RobloxStudioContext,
+  port: StudioDiscoveryPort,
+): Promise<RobloxStudioContext> {
+  if (current.status === "not-needed") {
+    return current;
+  }
+
+  if (current.status === "resolved" && current.studioId) {
+    return current;
+  }
+
+  const discoveryTool = port.findDiscoveryToolName();
+
+  if (!discoveryTool) {
+    return {
+      status: "unresolved",
+      error: "No Roblox Studio discovery tool is registered.",
+    };
+  }
+
+  const result = await port.execute(discoveryTool, {});
+
+  if (!result.success) {
+    return {
+      status: "unavailable",
+      error: result.error ?? "Studio discovery failed.",
+    };
+  }
+
+  const candidates = extractStudioCandidates(result.data);
+
+  if (candidates.length === 0) {
+    return {
+      status: "unavailable",
+      availableStudios: [],
+      error: "No connected Roblox Studio instance was found.",
+    };
+  }
+
+  if (candidates.length === 1) {
+    return {
+      status: "resolved",
+      studioId: candidates[0].id,
+      studioName: candidates[0].name,
+      availableStudios: candidates,
+      discoveredAt: Date.now(),
+    };
+  }
+
+  const active = findActiveStudioCandidate(result.data, candidates);
+
+  if (active) {
+    return {
+      status: "resolved",
+      studioId: active.id,
+      studioName: active.name,
+      availableStudios: candidates,
+      discoveredAt: Date.now(),
+    };
+  }
+
+  return {
+    status: "unavailable",
+    availableStudios: candidates,
+    error: `Multiple Roblox Studio instances are open (${candidates.length}) and none is marked active/focused. Ask the user which one to use.`,
+  };
+}
+
+export function findStudioDiscoveryToolName(
+  toolNames: string[],
+): string | null {
+  const match = toolNames.find((name) => {
+    const lower = name.toLowerCase();
+    return (
+      lower.includes("studio") &&
+      (lower.includes("list") || lower.includes("studios"))
+    );
+  });
+
+  return match ?? null;
+}
+
+===== FILE: src\agent\execution-types.ts =====
+
+import type { ModelCapability } from "../router/model-router.js";
+import type { ToolGroup } from "../tools/registry.js";
+import type { ToolFailureCategory } from "../tools/types.js";
+import type { RobloxStudioContext } from "./studio-context.js";
+
+export type AgentPhase =
+  | "understand"
+  | "inspect"
+  | "plan"
+  | "build"
+  | "execute"
+  | "test"
+  | "debug"
+  | "verify"
+  | "complete"
+  | "failed";
+
+export type TaskIntent =
+  | "chat"
+  | "coding"
+  | "building"
+  | "debugging"
+  | "testing"
+  | "inspection"
+  | "planning"
+  | "analysis";
+
+export type EvidenceType =
+  | "STUDIO_DISCOVERED"
+  | "STUDIO_INSPECTED"
+  | "WORKSPACE_INSPECTED"
+  | "SCRIPT_READ"
+  | "BUILD_CREATED"
+  | "BUILD_VERIFIED"
+  | "TEST_PASSED";
+
+export interface Evidence {
+  type: EvidenceType;
+  sourceTool: string;
+  timestamp: number;
+  summary: string;
+  data?: unknown;
+}
+
+export interface SuccessCriterion {
+  id: string;
+  description: string;
+  required: boolean;
+}
+
+export interface AgentPlan {
+  intent: TaskIntent;
+  capability: ModelCapability;
+  objective: string;
+  needsRoblox: boolean;
+  needsFiles: boolean;
+  needsTerminal: boolean;
+  requiresInspection: boolean;
+  requiresBuild: boolean;
+  requiresTesting: boolean;
+  requiresVerification: boolean;
+  destructiveRequested: boolean;
+  explicitReadOnly: boolean;
+  protectedTargets: string[];
+  successCriteria: SuccessCriterion[];
+  preferredToolGroups: ToolGroup[];
+  reason: string;
+}
+
+export interface ToolExecution {
+  id: string;
+  name: string;
+  input: unknown;
+  executedInput?: unknown;
+  success: boolean;
+  data?: unknown;
+  error?: string;
+  errorType?: ToolFailureCategory;
+  iteration: number;
+  phase: AgentPhase;
+  startedAt: string;
+  finishedAt: string;
+}
+
+export interface VerificationCheck {
+  id: string;
+  description: string;
+  passed: boolean;
+  evidence: string[];
+  sourceTools: string[];
+}
+
+export interface VerificationState {
+  required: boolean;
+  attempted: boolean;
+  passed: boolean;
+  checks: VerificationCheck[];
+  evidence: string[];
+  reason: string;
+}
+
+export interface AgentError {
+  phase: AgentPhase;
+  message: string;
+  tool?: string;
+  recoverable: boolean;
+  timestamp: string;
+}
+
+export interface AgentExecutionState {
+  taskId: string;
+  originalRequest: string;
+  capability: ModelCapability;
+  createdAt: string;
+  plan: AgentPlan;
+  phase: AgentPhase;
+  studioContext: RobloxStudioContext;
+  executedTools: ToolExecution[];
+  successfulTools: ToolExecution[];
+  failedTools: ToolExecution[];
+  evidence: Evidence[];
+  consecutiveFailures: number;
+  noProgressIterations: number;
+  noProgressRecoveryStreak: number;
+  recoveryAttempts: number;
+  iteration: number;
+  totalToolCalls: number;
+  completed: boolean;
+  failed: boolean;
+  failedCallSignatures: Set<string>;
+  staleRetrySignatures: Set<string>;
+  verification: VerificationState;
+  errors: AgentError[];
+  finalContent: string;
+}
+
+===== FILE: src\agent\evidence.ts =====
+
+import type { ToolGroup } from "../tools/registry.js";
+import type {
+  AgentExecutionState,
+  Evidence,
+  EvidenceType,
+} from "./execution-types.js";
+
+export function evidenceFromToolResult(input: {
+  toolName: string;
+  group?: ToolGroup;
+  success: boolean;
+  data?: unknown;
+}): Evidence | null {
+  if (!input.success) {
+    return null;
+  }
+
+  const name = input.toolName.toLowerCase();
+  const type = classifyEvidenceType(name, input.group);
+
+  if (!type) {
+    return null;
+  }
+
+  return {
+    type,
+    sourceTool: input.toolName,
+    timestamp: Date.now(),
+    summary: summarize(input.data),
+    data: input.data,
+  };
+}
+
+export function classifyEvidenceType(
+  toolName: string,
+  group?: ToolGroup,
+): EvidenceType | null {
+  const name = toolName.toLowerCase();
+
+  if (
+    name.includes("studio") &&
+    (name.includes("list") || name.includes("studios"))
+  ) {
+    return "STUDIO_DISCOVERED";
+  }
+
+  if (
+    name.includes("script") &&
+    (name.includes("read") || name.includes("search") || name.includes("grep"))
+  ) {
+    return "SCRIPT_READ";
+  }
+
+  if (group === "roblox-building" || isBuildToolName(name)) {
+    return "BUILD_CREATED";
+  }
+
+  if (group === "roblox-execution" || isTestToolName(name)) {
+    return "TEST_PASSED";
+  }
+
+  if (
+    name.includes("workspace") ||
+    name.includes("game_tree") ||
+    name.includes("datamodel") ||
+    name.includes("search_game")
+  ) {
+    return "WORKSPACE_INSPECTED";
+  }
+
+  if (
+    group === "roblox-inspection" ||
+    /inspect|find|get_|list_|read_|search_|tree|output|error|console/.test(
+      name,
+    )
+  ) {
+    return "STUDIO_INSPECTED";
+  }
+
+  if (name === "read_file" || name === "list_files") {
+    return "SCRIPT_READ";
+  }
+
+  return null;
+}
+
+export function recordEvidence(
+  state: AgentExecutionState,
+  evidence: Evidence,
+): void {
+  state.evidence.push(evidence);
+}
+
+export function hasEvidence(
+  state: AgentExecutionState,
+  type: EvidenceType,
+): boolean {
+  return state.evidence.some((item) => item.type === type);
+}
+
+export function hasInspectionEvidence(state: AgentExecutionState): boolean {
+  return state.evidence.some((item) =>
+    (
+      [
+        "STUDIO_INSPECTED",
+        "WORKSPACE_INSPECTED",
+        "SCRIPT_READ",
+      ] as EvidenceType[]
+    ).includes(item.type),
+  );
+}
+
+export function hasBuildEvidence(state: AgentExecutionState): boolean {
+  return hasEvidence(state, "BUILD_CREATED");
+}
+
+export function hasTestingEvidence(state: AgentExecutionState): boolean {
+  return hasEvidence(state, "TEST_PASSED");
+}
+
+export function hasBuildVerification(state: AgentExecutionState): boolean {
+  return (
+    hasEvidence(state, "BUILD_VERIFIED") ||
+    (hasBuildEvidence(state) && hasInspectionEvidence(state))
+  );
+}
+
+export function getUnsatisfiedRequirements(
+  state: AgentExecutionState,
+): string[] {
+  const unsatisfied: string[] = [];
+  const plan = state.plan;
+
+  if (plan.requiresInspection && !hasInspectionEvidence(state)) {
+    unsatisfied.push(
+      "inspection evidence (no successful inspection tool call yet)",
+    );
+  }
+
+  if (plan.requiresBuild && !hasBuildEvidence(state)) {
+    unsatisfied.push("build evidence (no successful build tool call yet)");
+  }
+
+  if (plan.requiresBuild && hasBuildEvidence(state) && !hasBuildVerification(state)) {
+    unsatisfied.push(
+      "build verification (created object has not been inspected)",
+    );
+  }
+
+  if (plan.requiresTesting && !hasTestingEvidence(state)) {
+    unsatisfied.push("testing evidence (no successful runtime test yet)");
+  }
+
+  return unsatisfied;
+}
+
+export function canComplete(state: AgentExecutionState): boolean {
+  if (state.failed || state.completed) {
+    return state.completed && !state.failed;
+  }
+
+  if (getUnsatisfiedRequirements(state).length > 0) {
+    return false;
+  }
+
+  if (state.plan.requiresVerification && !state.verification.passed) {
+    return false;
+  }
+
+  return true;
+}
+
+export function formatEstablishedEvidence(
+  state: AgentExecutionState,
+): string {
+  if (state.evidence.length === 0) {
+    return "(no evidence yet)";
+  }
+
+  const lines = [
+    `Studio: ${describeStudio(state)}`,
+    "",
+    "Evidence:",
+    ...state.evidence.map(
+      (item) => `- [${item.type}] ${item.sourceTool}: ${item.summary}`,
+    ),
+  ];
+
+  return lines.join("\n");
+}
+
+function describeStudio(state: AgentExecutionState): string {
+  const context = state.studioContext;
+
+  if (context.status === "resolved") {
+    return `id=${context.studioId}${context.studioName ? ` name=${context.studioName}` : ""} mode=${context.mode ?? "unknown"}`;
+  }
+
+  return context.status;
+}
+
+function isBuildToolName(name: string): boolean {
+  return /create|build|insert|generate|modify|update|set_|move_|clone_|duplicate_|mesh|material/.test(
+    name,
+  );
+}
+
+function isTestToolName(name: string): boolean {
+  return /playtest|test|run_game|start_stop_play|start_play|execute_luau/.test(
+    name,
+  );
+}
+
+function summarize(data: unknown): string {
+  if (data === undefined || data === null) {
+    return "success with no data";
+  }
+
+  if (typeof data === "string") {
+    return data.slice(0, 400);
+  }
+
+  try {
+    return JSON.stringify(data).slice(0, 400);
+  } catch {
+    return String(data);
+  }
+}
+
+===== FILE: src\agent\policy.ts =====
+
+import type { ToolRegistry } from "../tools/registry.js";
+import type { AgentPlan } from "./execution-types.js";
+
+export type PolicyBlockReason =
+  | "explicit-read-only-policy"
+  | "destructive-operation-policy"
+  | null;
+
+export function getToolPolicyBlock(
+  registry: ToolRegistry,
+  toolName: string,
+  plan: AgentPlan,
+): PolicyBlockReason {
+  const registered = registry.getRegistered(toolName);
+
+  if (!registered) {
+    return null;
+  }
+
+  if (plan.explicitReadOnly && registered.mutating) {
+    return "explicit-read-only-policy";
+  }
+
+  if (registered.destructive && !plan.destructiveRequested) {
+    return "destructive-operation-policy";
+  }
+
+  return null;
+}
+
+export function policyBlockMessage(
+  toolName: string,
+  reason: Exclude<PolicyBlockReason, null>,
+): string {
+  if (reason === "explicit-read-only-policy") {
+    return `Tool "${toolName}" was blocked because the user explicitly requested no modifications.`;
+  }
+
+  return `Destructive tool "${toolName}" was blocked because the user's request did not explicitly authorize destructive changes.`;
+}
+
+===== FILE: src\agent\serialize.ts =====
+
+export function stableStringify(value: unknown): string {
+  const sort = (input: unknown): unknown => {
+    if (Array.isArray(input)) {
+      return input.map(sort);
+    }
+
+    if (input && typeof input === "object") {
+      return Object.keys(input as Record<string, unknown>)
+        .sort()
+        .reduce((accumulator: Record<string, unknown>, key) => {
+          accumulator[key] = sort(
+            (input as Record<string, unknown>)[key],
+          );
+          return accumulator;
+        }, {});
+    }
+
+    return input;
+  };
+
+  try {
+    return JSON.stringify(sort(value));
+  } catch {
+    return String(value);
+  }
+}
+
+export function toolSignature(
+  toolName: string,
+  args: unknown,
+): string {
+  return `${toolName}:${stableStringify(args)}`;
+}
+
+export function truncate(value: string, max: number): string {
+  if (value.length <= max) {
+    return value;
+  }
+
+  return `${value.slice(0, max)}\n...[truncated]`;
+}
+
+===== FILE: src\tools\roblox\mcp-client.ts =====
+
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+export interface RobloxMCPTool {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface RobloxMCPToolResult {
+  content?: unknown;
+  structuredContent?: unknown;
+  isError?: boolean;
+}
+
+export class RobloxMCPClient {
+  private client: Client | null = null;
+  private transport: StdioClientTransport | null = null;
+
+  private connected = false;
+
+  async connect(): Promise<void> {
+    if (this.connected && this.client) {
+      return;
+    }
+
+    const command =
+      process.env.ROBUX_MCP_COMMAND ??
+      "cmd.exe";
+
+    const args =
+      process.env.ROBUX_MCP_ARGS
+        ? JSON.parse(process.env.ROBUX_MCP_ARGS)
+        : [
+            "/c",
+            "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat",
+          ];
+
+    this.client = new Client(
+      {
+        name: "roblox-ai-studio",
+        version: "0.1.0",
+      },
+    );
+
+    this.transport =
+      new StdioClientTransport({
+        command,
+        args,
+      });
+
+    await this.client.connect(
+      this.transport,
+    );
+
+    this.connected = true;
+  }
+
+  isConnected(): boolean {
+    return this.connected;
+  }
+
+  async listTools(): Promise<RobloxMCPTool[]> {
+    await this.ensureConnected();
+
+    const result =
+      await this.client!.listTools();
+
+    return result.tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      inputSchema:
+        tool.inputSchema as Record<
+          string,
+          unknown
+        >,
+    }));
+  }
+
+  async callTool(
+    name: string,
+    arguments_: Record<string, unknown> = {},
+  ): Promise<RobloxMCPToolResult> {
+    await this.ensureConnected();
+
+    const result =
+      await this.client!.callTool({
+        name,
+        arguments: arguments_,
+      });
+
+    return {
+  content: result.content,
+  structuredContent:
+    result.structuredContent,
+  isError:
+    result.isError === true,
+};
+  }
+
+  async close(): Promise<void> {
+    if (!this.client) {
+      return;
+    }
+
+    try {
+      await this.client.close();
+    } finally {
+      this.client = null;
+      this.transport = null;
+      this.connected = false;
+    }
+  }
+
+  private async ensureConnected(): Promise<void> {
+    if (!this.connected || !this.client) {
+      await this.connect();
+    }
+  }
+}
+
+===== FILE: src\tools\registry.ts =====
+
+import { z } from "zod";
+
+import type { AIToolDefinition } from "../providers/provider.js";
+
+import type {
+  ToolContext,
+  ToolDefinition,
+  ToolGroup,
+  ToolResult,
+} from "./types.js";
+
+import { jsonSchemaSummary } from "../agent/schema-correction.js";
+
+export type { ToolGroup } from "./types.js";
+
+export interface RegisteredTool {
+  tool: ToolDefinition;
+  group: ToolGroup;
+  groupInferred: boolean;
+  mutating: boolean;
+  destructive: boolean;
+  requiresStudioContext: boolean;
+}
+
+export interface ToolExposureOptions {
+  includeDescriptions?: boolean;
+  sort?: boolean;
+  maxTools?: number;
+}
+
+const DESTRUCTIVE_NAME_PATTERNS = [
+  "delete",
+  "destroy",
+  "remove",
+  "wipe",
+  "clear",
+  "purge",
+  "truncate",
+  "reset",
+  "shutdown",
+];
+
+export class ToolRegistry {
+  private readonly tools = new Map<string, RegisteredTool>();
+
+  register(tool: ToolDefinition, group?: ToolGroup): void {
+    const name = tool.name.trim();
+
+    if (!name) {
+      throw new Error("Cannot register a tool without a name.");
+    }
+
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) {
+      throw new Error(`Invalid tool name: ${name}`);
+    }
+
+    if (this.tools.has(name)) {
+      throw new Error(`Tool already registered: ${name}`);
+    }
+
+    const description = tool.description?.trim();
+
+    if (!description) {
+      throw new Error(`Tool "${name}" must have a description.`);
+    }
+
+    const resolvedGroup = group ?? tool.group ?? inferToolGroup(name);
+    const groupInferred = group === undefined && tool.group === undefined;
+
+    if (groupInferred) {
+      console.warn(
+        `[ToolRegistry] "${name}" registered without an explicit group; ` +
+          `inferred "${resolvedGroup}" from its name.`,
+      );
+    }
+
+    const destructive =
+      tool.destructive ?? isDestructiveName(name);
+
+    this.tools.set(name, {
+      tool: {
+        ...tool,
+        name,
+        description,
+      },
+      group: resolvedGroup,
+      groupInferred,
+      mutating: tool.mutating ?? inferMutating(name, resolvedGroup, destructive),
+      destructive,
+      requiresStudioContext:
+        tool.requiresStudioContext ??
+        resolvedGroup.startsWith("roblox"),
+    });
+  }
+
+  has(name: string): boolean {
+    return this.tools.has(name);
+  }
+
+  get(name: string): ToolDefinition | undefined {
+    return this.tools.get(name)?.tool;
+  }
+
+  getGroup(name: string): ToolGroup | undefined {
+    return this.tools.get(name)?.group;
+  }
+
+  getRegistered(name: string): RegisteredTool | undefined {
+    return this.tools.get(name);
+  }
+
+  isDestructiveTool(name: string): boolean {
+    return this.tools.get(name)?.destructive ?? false;
+  }
+
+  isMutatingTool(name: string): boolean {
+    return this.tools.get(name)?.mutating ?? false;
+  }
+
+  list(): ToolDefinition[] {
+    return [...this.tools.values()].map((entry) => entry.tool);
+  }
+
+  listRegistered(): RegisteredTool[] {
+    return [...this.tools.values()];
+  }
+
+  listByGroup(group: ToolGroup): ToolDefinition[] {
+    return [...this.tools.values()]
+      .filter((entry) => entry.group === group)
+      .map((entry) => entry.tool);
+  }
+
+  getToolsForGroups(groups: readonly ToolGroup[]): ToolDefinition[] {
+    const allowed = new Set(groups);
+
+    return [...this.tools.values()]
+      .filter((entry) => allowed.has(entry.group))
+      .map((entry) => entry.tool);
+  }
+
+  getJSONSchema(name: string): Record<string, unknown> | undefined {
+    const registered = this.tools.get(name);
+
+    if (!registered) {
+      return undefined;
+    }
+
+    return z.toJSONSchema(registered.tool.inputSchema) as Record<
+      string,
+      unknown
+    >;
+  }
+
+  getAIDefinitions(
+    groups?: readonly ToolGroup[],
+    options: ToolExposureOptions = {},
+  ): AIToolDefinition[] {
+    const entries =
+      groups && groups.length > 0
+        ? [...this.tools.values()].filter((entry) =>
+            groups.includes(entry.group),
+          )
+        : [...this.tools.values()];
+
+    let selected = entries;
+
+    if (options.sort !== false) {
+      selected = [...selected].sort((a, b) =>
+        a.tool.name.localeCompare(b.tool.name),
+      );
+    }
+
+    if (options.maxTools !== undefined && options.maxTools > 0) {
+      selected = selected.slice(0, options.maxTools);
+    }
+
+    return selected.map((entry) => ({
+      type: "function" as const,
+      function: {
+        name: entry.tool.name,
+        description:
+          options.includeDescriptions === false
+            ? entry.tool.name
+            : entry.tool.description,
+        parameters: z.toJSONSchema(entry.tool.inputSchema) as Record<
+          string,
+          unknown
+        >,
+      },
+    }));
+  }
+
+  async execute(
+    name: string,
+    input: unknown,
+    context: ToolContext,
+  ): Promise<ToolResult> {
+    const registered = this.tools.get(name);
+
+    if (!registered) {
+      return {
+        success: false,
+        errorType: "UNKNOWN",
+        tool: name,
+        error: `Tool not found: ${name}`,
+        receivedArguments: input,
+      };
+    }
+
+    const parsed = registered.tool.inputSchema.safeParse(input);
+
+    if (!parsed.success) {
+      const schema = this.getJSONSchema(name);
+      const expectedSchema = jsonSchemaSummary(
+        schema as {
+          properties?: Record<string, { type?: string }>;
+          required?: string[];
+        },
+      );
+
+      return {
+        success: false,
+        errorType: "VALIDATION",
+        tool: name,
+        error: `Invalid input for ${name}: ${this.formatValidationError(parsed.error)}`,
+        expectedSchema,
+        receivedArguments: input,
+      };
+    }
+
+    try {
+      const result = await registered.tool.execute(parsed.data, context);
+
+      if (!result || typeof result.success !== "boolean") {
+        return {
+          success: false,
+          errorType: "RUNTIME",
+          tool: name,
+          error: `Tool "${name}" returned an invalid ToolResult.`,
+        };
+      }
+
+      return {
+        ...result,
+        tool: name,
+        errorType: result.success
+          ? undefined
+          : result.errorType ?? "RUNTIME",
+      };
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : String(error);
+
+      return {
+        success: false,
+        errorType: /timeout/i.test(message) ? "TIMEOUT" : "RUNTIME",
+        tool: name,
+        error: message,
+      };
+    }
+  }
+
+  private formatValidationError(error: z.ZodError): string {
+    const flattened = error.flatten();
+
+    const fieldIssues = Object.entries(flattened.fieldErrors).map(
+      ([field, issues]) =>
+        `${field}: ${Array.isArray(issues) ? issues.join(", ") : String(issues ?? "")}`,
+    );
+
+    const all = [...fieldIssues, ...flattened.formErrors];
+
+    return all.length > 0 ? all.join("; ") : error.message;
+  }
+}
+
+export function inferToolGroup(toolName: string): ToolGroup {
+  const name = toolName.toLowerCase();
+
+  if (
+    name === "list_files" ||
+    name === "read_file" ||
+    name === "write_file" ||
+    name === "delete_file" ||
+    name.startsWith("file_") ||
+    name.endsWith("_file") ||
+    name.includes("filesystem")
+  ) {
+    return "filesystem";
+  }
+
+  if (
+    name === "run_command" ||
+    name.includes("command") ||
+    name.includes("shell") ||
+    name.includes("terminal") ||
+    name.includes("powershell")
+  ) {
+    return "terminal";
+  }
+
+  if (name.startsWith("roblox_")) {
+    if (isRobloxExecutionTool(name)) {
+      return "roblox-execution";
+    }
+
+    if (isRobloxBuildingTool(name)) {
+      return "roblox-building";
+    }
+
+    return "roblox-inspection";
+  }
+
+  return "general";
+}
+
+export function inferMutating(
+  toolName: string,
+  group: ToolGroup,
+  destructive: boolean,
+): boolean {
+  if (destructive) {
+    return true;
+  }
+
+  if (group === "roblox-building" || group === "terminal") {
+    return true;
+  }
+
+  if (toolName === "write_file") {
+    return true;
+  }
+
+  if (group === "roblox-execution") {
+    return true;
+  }
+
+  return false;
+}
+
+export function isDestructiveName(toolName: string): boolean {
+  const name = toolName.toLowerCase();
+
+  return DESTRUCTIVE_NAME_PATTERNS.some((pattern) => name.includes(pattern));
+}
+
+export function isRobloxExecutionTool(name: string): boolean {
+  const patterns = [
+    "start_stop_play",
+    "start_play",
+    "stop_play",
+    "play_game",
+    "run_game",
+    "playtest",
+    "test_game",
+    "execute_luau",
+    "execute_code",
+    "run_luau",
+    "run_script",
+    "run_code",
+    "restart",
+    "shutdown",
+    "publish",
+  ];
+
+  return patterns.some((pattern) => name.includes(pattern));
+}
+
+export function isRobloxBuildingTool(name: string): boolean {
+  const patterns = [
+    "create_instance",
+    "create_part",
+    "create_model",
+    "insert_instance",
+    "insert_model",
+    "insert_asset",
+    "modify_instance",
+    "update_instance",
+    "set_property",
+    "generate_procedural",
+    "generate_mesh",
+    "generate_material",
+    "segment_mesh",
+    "create_folder",
+    "create_script",
+    "create_module",
+    "clone_instance",
+    "duplicate_instance",
+    "rename_instance",
+    "parent_instance",
+    "move_instance",
+  ];
+
+  return patterns.some((pattern) => name.includes(pattern));
+}
+
+===== FILE: src\tools\types.ts =====
+
+import { z } from "zod";
+
+export type ToolGroup =
+  | "filesystem"
+  | "terminal"
+  | "roblox-inspection"
+  | "roblox-execution"
+  | "roblox-building"
+  | "general";
+
+export type ToolFailureCategory =
+  | "VALIDATION"
+  | "MISSING_PREREQUISITE"
+  | "INVALID_CONTEXT"
+  | "STUDIO_DISCONNECTED"
+  | "RUNTIME"
+  | "PERMISSION"
+  | "TIMEOUT"
+  | "DUPLICATE"
+  | "UNKNOWN";
+
+export interface ToolPrerequisite {
+  parameter: string;
+  resolver: string;
+}
+
+export interface ToolContext {
+  sessionId: string;
+}
+
+export interface ToolResult<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  errorType?: ToolFailureCategory;
+  tool?: string;
+  expectedSchema?: Record<string, string>;
+  receivedArguments?: unknown;
+  suggestedCorrection?: Record<string, unknown>;
+  blocked?: string;
+}
+
+export interface ToolDefinition<TInput = unknown, TOutput = unknown> {
+  name: string;
+  description: string;
+  inputSchema: z.ZodType<TInput>;
+  group?: ToolGroup;
+  mutating?: boolean;
+  destructive?: boolean;
+  requiresStudioContext?: boolean;
+  prerequisites?: ToolPrerequisite[];
+  execute(
+    input: TInput,
+    context: ToolContext,
+  ): Promise<ToolResult<TOutput>>;
+}
+
+export function classifyToolFailure(
+  error: string | undefined,
+  options?: {
+    blocked?: string;
+    errorType?: ToolFailureCategory;
+  },
+): ToolFailureCategory {
+  if (options?.errorType) {
+    return options.errorType;
+  }
+
+  if (options?.blocked === "duplicate-failed-call") {
+    return "DUPLICATE";
+  }
+
+  if (
+    options?.blocked === "explicit-read-only-policy" ||
+    options?.blocked === "destructive-operation-policy"
+  ) {
+    return "PERMISSION";
+  }
+
+  const text = error ?? "";
+
+  if (/timeout/i.test(text)) {
+    return "TIMEOUT";
+  }
+
+  if (
+    /not connected/i.test(text) ||
+    /target is closed/i.test(text) ||
+    /studio (is )?(disconnected|unreachable|closed)/i.test(text) ||
+    /asset datamodel/i.test(text)
+  ) {
+    return "STUDIO_DISCONNECTED";
+  }
+
+  if (/invalid input|missing required|unknown parameter/i.test(text)) {
+    return "VALIDATION";
+  }
+
+  if (/permission|denied|not allowed|blocked/i.test(text)) {
+    return "PERMISSION";
+  }
+
+  if (/studio_id|prerequisite/i.test(text)) {
+    return "MISSING_PREREQUISITE";
+  }
+
+  return "UNKNOWN";
+}

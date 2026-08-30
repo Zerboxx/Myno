@@ -1,0 +1,401 @@
+﻿import crypto from "node:crypto";
+
+import type { AIToolCall } from "../providers/provider.js";
+import type { ToolRegistry } from "../tools/registry.js";
+import type { ToolResult } from "../tools/types.js";
+import { classifyToolFailure } from "../tools/types.js";
+import {
+  prepareToolArguments,
+  toStructuredToolError,
+} from "../tools/tool-validator.js";
+import {
+  evidenceFromToolResult,
+  recordEvidence,
+} from "./evidence.js";
+import type { AgentExecutionState, ToolExecution } from "./execution-types.js";
+import { getToolPolicyBlock, policyBlockMessage } from "./policy.js";
+import { toolSignature } from "./serialize.js";
+import {
+  findStudioIdParameterKey,
+  looksLikeStaleStudioError,
+  normalizeRobloxToolArguments,
+} from "./studio-context.js";
+import {
+  findStudioDiscoveryToolName,
+  invalidateStudioContext,
+  resolveStudioContext,
+} from "./studio-resolver.js";
+
+export class ToolRuntime {
+  constructor(
+    private readonly registry: ToolRegistry,
+    private readonly sessionId: string,
+  ) {}
+
+  findDiscoveryToolName(): string | null {
+    return findStudioDiscoveryToolName(
+      this.registry.list().map((tool) => tool.name),
+    );
+  }
+
+  async ensureStudioContext(
+    state: AgentExecutionState,
+  ): Promise<void> {
+    if (!state.plan.needsRoblox) {
+      state.studioContext = { status: "not-needed" };
+      return;
+    }
+
+    state.studioContext = await resolveStudioContext(
+      state.studioContext,
+      {
+        findDiscoveryToolName: () => this.findDiscoveryToolName(),
+        execute: (name, input) =>
+          this.registry.execute(name, input, {
+            sessionId: this.sessionId,
+          }),
+      },
+    );
+
+    if (
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId
+    ) {
+      const evidence = evidenceFromToolResult({
+        toolName: this.findDiscoveryToolName() ?? "studio_discovery",
+        group: "roblox-inspection",
+        success: true,
+        data: {
+          studioId: state.studioContext.studioId,
+          studioName: state.studioContext.studioName,
+        },
+      });
+
+      if (evidence) {
+        recordEvidence(state, evidence);
+      }
+    }
+  }
+
+  async executeToolCalls(
+    state: AgentExecutionState,
+    toolCalls: AIToolCall[],
+    limits: { maxTotal: number; maxPerIteration: number },
+  ): Promise<void> {
+    for (const toolCall of toolCalls.slice(0, limits.maxPerIteration)) {
+      if (state.totalToolCalls >= limits.maxTotal) {
+        break;
+      }
+
+      state.totalToolCalls += 1;
+      await this.executeOne(state, toolCall);
+    }
+  }
+
+  async executeOne(
+    state: AgentExecutionState,
+    toolCall: AIToolCall,
+  ): Promise<ToolResult> {
+    const name = toolCall.function.name;
+    const rawInput = toolCall.function.arguments ?? {};
+    const startedAt = new Date().toISOString();
+    const executionId = crypto.randomUUID();
+
+    if (!this.registry.has(name)) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(name, "UNKNOWN", `Unknown tool: ${name}`, {
+          receivedArguments: rawInput,
+        }),
+        startedAt,
+      );
+    }
+
+    const signature = toolSignature(name, rawInput);
+
+    if (state.failedCallSignatures.has(signature)) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(
+          name,
+          "DUPLICATE",
+          `Tool "${name}" was blocked because it already failed with these exact same arguments.`,
+          {
+            blocked: "duplicate-failed-call",
+            receivedArguments: rawInput,
+          },
+        ),
+        startedAt,
+      );
+    }
+
+    const policy = getToolPolicyBlock(this.registry, name, state.plan);
+
+    if (policy) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        toStructuredToolError(
+          name,
+          "PERMISSION",
+          policyBlockMessage(name, policy),
+          { blocked: policy, receivedArguments: rawInput },
+        ),
+        startedAt,
+      );
+    }
+
+    const prepared = prepareToolArguments(this.registry, name, rawInput);
+    let args = prepared.args;
+
+    const registered = this.registry.getRegistered(name);
+    const schema = prepared.schema;
+    const studioIdKey = findStudioIdParameterKey(schema?.properties);
+    const discoveryTool = this.findDiscoveryToolName();
+    const needsStudio =
+      Boolean(studioIdKey) ||
+      Boolean(registered?.requiresStudioContext);
+
+    if (
+      needsStudio &&
+      name !== discoveryTool &&
+      state.studioContext.status !== "resolved"
+    ) {
+      await this.ensureStudioContext(state);
+    }
+
+    if (
+      studioIdKey &&
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId &&
+      name !== discoveryTool
+    ) {
+      const injected = normalizeRobloxToolArguments(
+        args,
+        studioIdKey,
+        state.studioContext.studioId,
+      );
+      args = injected.normalized;
+    }
+
+    const afterInject = prepareToolArguments(this.registry, name, args);
+
+    if (
+      afterInject.validationError &&
+      afterInject.validationError.errorType === "MISSING_PREREQUISITE"
+    ) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        afterInject.validationError,
+        startedAt,
+      );
+    }
+
+    if (afterInject.validationError) {
+      return this.fail(
+        state,
+        executionId,
+        name,
+        rawInput,
+        afterInject.validationError,
+        startedAt,
+      );
+    }
+
+    args = afterInject.args;
+
+  let result = await this.registry.execute(name, args, {
+    sessionId: this.sessionId,
+  });
+
+  const staleEligible =
+    !result.success &&
+    name !== discoveryTool &&
+    (looksLikeStaleStudioError(result.error) ||
+      result.errorType === "STUDIO_DISCONNECTED") &&
+    !state.staleRetrySignatures.has(signature);
+
+  if (staleEligible) {
+    state.staleRetrySignatures.add(signature);
+    state.studioContext = invalidateStudioContext();
+    await this.ensureStudioContext(state);
+
+    if (
+      state.studioContext.status === "resolved" &&
+      state.studioContext.studioId
+    ) {
+      const retryArgs = normalizeRobloxToolArguments(
+        afterInject.args,
+        studioIdKey,
+        state.studioContext.studioId,
+      ).normalized;
+
+      result = await this.registry.execute(name, retryArgs, {
+        sessionId: this.sessionId,
+      });
+
+      // Keep the actual arguments used by the successful retry in the execution record.
+      args = retryArgs;
+    }
+  }
+
+  return this.finish(
+    state,
+    executionId,
+    name,
+    rawInput,
+    args,
+    result,
+    startedAt,
+    signature,
+  );
+  }
+
+  private fail(
+    state: AgentExecutionState,
+    executionId: string,
+    name: string,
+    input: unknown,
+    result: ToolResult,
+    startedAt: string,
+  ): ToolResult {
+    const signature = toolSignature(name, input);
+    state.failedCallSignatures.add(signature);
+
+    const execution = this.toExecution(
+      executionId,
+      name,
+      input,
+      result,
+      startedAt,
+      state,
+    );
+
+    state.executedTools.push(execution);
+    state.failedTools.push(execution);
+    state.consecutiveFailures += 1;
+    state.errors.push({
+      phase: state.phase,
+      message: result.error ?? "Tool failed",
+      tool: name,
+      recoverable: result.errorType !== "PERMISSION",
+      timestamp: new Date().toISOString(),
+    });
+
+    return result;
+  }
+
+  private finish(
+    state: AgentExecutionState,
+    executionId: string,
+    name: string,
+    input: unknown,
+    executedInput: unknown,
+    result: ToolResult,
+    startedAt: string,
+    signature: string,
+  ): ToolResult {
+    const classified: ToolResult = result.success
+      ? result
+      : {
+          ...result,
+          errorType: classifyToolFailure(result.error, {
+            errorType: result.errorType,
+            blocked: result.blocked,
+          }),
+        };
+
+    const execution: ToolExecution = {
+      ...this.toExecution(
+        executionId,
+        name,
+        input,
+        classified,
+        startedAt,
+        state,
+      ),
+      executedInput,
+    };
+
+    state.executedTools.push(execution);
+
+    if (classified.success) {
+      state.successfulTools.push(execution);
+      state.consecutiveFailures = 0;
+
+      const evidence = evidenceFromToolResult({
+        toolName: name,
+        group: this.registry.getGroup(name),
+        success: true,
+        data: classified.data,
+      });
+
+      if (evidence) {
+        recordEvidence(state, evidence);
+      }
+
+      if (
+        evidence?.type === "BUILD_CREATED" &&
+        state.evidence.some(
+          (item) =>
+            item.type === "STUDIO_INSPECTED" ||
+            item.type === "WORKSPACE_INSPECTED",
+        )
+      ) {
+        recordEvidence(state, {
+          type: "BUILD_VERIFIED",
+          sourceTool: name,
+          timestamp: Date.now(),
+          summary: "Build succeeded after inspection context was established.",
+        });
+      }
+    } else {
+      state.failedTools.push(execution);
+      state.consecutiveFailures += 1;
+      state.failedCallSignatures.add(signature);
+      state.errors.push({
+        phase: state.phase,
+        message: classified.error ?? "Tool failed",
+        tool: name,
+        recoverable: classified.errorType !== "PERMISSION",
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    return classified;
+  }
+
+  private toExecution(
+    executionId: string,
+    name: string,
+    input: unknown,
+    result: ToolResult,
+    startedAt: string,
+    state: AgentExecutionState,
+  ): ToolExecution {
+    return {
+      id: executionId,
+      name,
+      input,
+      success: result.success,
+      data: result.data,
+      error: result.error,
+      errorType: result.errorType,
+      iteration: state.iteration,
+      phase: state.phase,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    };
+  }
+}

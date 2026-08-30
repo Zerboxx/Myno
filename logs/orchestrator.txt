@@ -1,0 +1,269 @@
+﻿import {
+  AgentRegistry,
+  type AgentContext,
+} from "./agent-registry.js";
+
+import {
+  createAgentState,
+  isTaskCompleted,
+  isTaskFailed,
+  updateAgentState,
+  type AgentState,
+} from "./agent-state.js";
+
+import type {
+  AgentExecutionResult,
+  AgentPhase,
+} from "./agent-types.js";
+
+export interface OrchestratorOptions {
+  executeTool: (
+    toolName: string,
+    input?: unknown,
+  ) => Promise<unknown>;
+
+  maxIterations?: number;
+  maxConsecutiveFailures?: number;
+}
+
+export interface OrchestratorResult {
+  state: AgentState;
+  success: boolean;
+  message: string;
+}
+
+export class AgentOrchestrator {
+  private readonly registry: AgentRegistry;
+  private readonly executeTool: (
+    toolName: string,
+    input?: unknown,
+  ) => Promise<unknown>;
+
+  private readonly maxIterations: number;
+  private readonly maxConsecutiveFailures: number;
+
+  constructor(
+    registry: AgentRegistry,
+    options: OrchestratorOptions,
+  ) {
+    this.registry = registry;
+    this.executeTool = options.executeTool;
+
+    this.maxIterations =
+      options.maxIterations ?? 50;
+
+    this.maxConsecutiveFailures =
+      options.maxConsecutiveFailures ?? 3;
+  }
+
+  async run(
+    taskId: string,
+    userMessage: string,
+  ): Promise<OrchestratorResult> {
+    const state = createAgentState(
+      taskId,
+      userMessage,
+    );
+
+    updateAgentState(state, {
+      status: "running",
+    });
+
+    try {
+      while (
+        !isTaskCompleted(state) &&
+        !isTaskFailed(state)
+      ) {
+        if (
+          state.iteration >=
+          this.maxIterations
+        ) {
+          return this.fail(
+            state,
+            "Maximum agent iterations exceeded.",
+          );
+        }
+
+        if (
+          state.consecutiveFailures >=
+          this.maxConsecutiveFailures
+        ) {
+          return this.fail(
+            state,
+            "Maximum consecutive agent failures exceeded.",
+          );
+        }
+
+        state.iteration += 1;
+
+        const agent =
+          this.registry.findHandler(state);
+
+        if (!agent) {
+          return this.fail(
+            state,
+            `No agent can handle phase "${state.phase}".`,
+          );
+        }
+
+        state.currentAgent =
+          agent.role;
+
+        const context: AgentContext = {
+          state,
+
+          executeTool: async (
+            toolName,
+            input,
+          ) => {
+            return this.executeTool(
+              toolName,
+              input,
+            );
+          },
+        };
+
+        let result: AgentExecutionResult;
+
+        try {
+          result =
+            await agent.execute(
+              context,
+            );
+        } catch (error) {
+          const message =
+            error instanceof Error
+              ? error.message
+              : String(error);
+
+          result = {
+            success: false,
+            error: message,
+            recoverable: true,
+          };
+        }
+
+        if (!result.success) {
+          state.failed = false;
+
+          state.failures.push({
+            agent: agent.role,
+            phase: state.phase,
+            message:
+              result.error ??
+              result.message ??
+              "Agent execution failed.",
+            recoverable:
+              result.recoverable ?? true,
+            timestamp: Date.now(),
+          });
+
+          state.consecutiveFailures += 1;
+
+          if (
+            state.consecutiveFailures >=
+            this.maxConsecutiveFailures
+          ) {
+            return this.fail(
+              state,
+              result.error ??
+                result.message ??
+                "Agent execution failed.",
+            );
+          }
+
+          continue;
+        }
+
+        state.consecutiveFailures = 0;
+
+        this.applyNextPhase(
+          state,
+          result.nextPhase,
+        );
+
+        if (
+          state.phase === "complete"
+        ) {
+          state.completed = true;
+          state.failed = false;
+          state.status = "completed";
+          break;
+        }
+
+        if (
+          state.phase === "failed"
+        ) {
+          return this.fail(
+            state,
+            result.error ??
+              result.message ??
+              "Agent marked task as failed.",
+          );
+        }
+      }
+
+      if (
+        state.completed &&
+        !state.failed
+      ) {
+        state.status = "completed";
+
+        return {
+          state,
+          success: true,
+          message:
+            "Agent task completed successfully.",
+        };
+      }
+
+      return this.fail(
+        state,
+        state.failureReason ??
+          "Agent task did not complete.",
+      );
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : String(error);
+
+      return this.fail(
+        state,
+        message,
+      );
+    }
+  }
+
+  private applyNextPhase(
+    state: AgentState,
+    nextPhase?: AgentPhase,
+  ): void {
+    if (!nextPhase) {
+      return;
+    }
+
+    updateAgentState(state, {
+      phase: nextPhase,
+    });
+  }
+
+  private fail(
+    state: AgentState,
+    reason: string,
+  ): OrchestratorResult {
+    updateAgentState(state, {
+      status: "failed",
+      failed: true,
+      completed: false,
+      phase: "failed",
+      failureReason: reason,
+    });
+
+    return {
+      state,
+      success: false,
+      message: reason,
+    };
+  }
+}

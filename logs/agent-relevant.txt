@@ -1,0 +1,2591 @@
+﻿
+  src\agent.ts:7:
+  src\agent.ts:8:import type {
+  src\agent.ts:9:  AIMessage,
+  src\agent.ts:10:  AIProvider,
+  src\agent.ts:11:  AIToolCall,
+  src\agent.ts:12:  AIToolDefinition,
+  src\agent.ts:13:  ChatResponse,
+  src\agent.ts:14:} from "./providers/provider.js";
+  src\agent.ts:15:
+  src\agent.ts:16:import {
+  src\agent.ts:17:  ModelRouter,
+  src\agent.ts:18:  type ModelCapability,
+  src\agent.ts:19:} from "./router/model-router.js";
+  src\agent.ts:20:
+  src\agent.ts:21:import {
+> src\agent.ts:22:  ToolRegistry,
+  src\agent.ts:23:  type ToolGroup,
+  src\agent.ts:24:} from "./tools/registry.js";
+  src\agent.ts:25:
+  src\agent.ts:26:import type {
+  src\agent.ts:27:  AgentResponse,
+  src\agent.ts:28:  AgentTask,
+  src\agent.ts:29:} from "./agent/types.js";
+  src\agent.ts:30:
+  src\agent.ts:31:import {
+  src\agent.ts:32:  extractStudioCandidates,
+> src\agent.ts:33:  findActiveStudioCandidate,
+  src\agent.ts:34:  looksLikeStaleStudioError,
+  src\agent.ts:35:  findStudioIdParameterKey,
+> src\agent.ts:36:  normalizeRobloxToolArguments,
+  src\agent.ts:37:  detectFullReadOnlyIntent,
+  src\agent.ts:38:  detectScopedProtectionTargets,
+> src\agent.ts:39:  type RobloxStudioContext,
+  src\agent.ts:40:  type StudioCandidate,
+  src\agent.ts:41:} from "./agent/studio-context.js";
+  src\agent.ts:42:
+  src\agent.ts:43:/* ============================================================================
+  src\agent.ts:44: * CONFIGURATION
+  src\agent.ts:45: * ========================================================================== */
+  src\agent.ts:46:
+  src\agent.ts:47:const toolFailureTracker =
+  src\agent.ts:48:  createToolFailureTracker();
+  src\agent.ts:49:  
+  src\agent.ts:50:const MAX_ITERATIONS = 32;
+  src\agent.ts:51:const MAX_TOOL_CALLS_PER_ITERATION = 12;
+  src\agent.ts:52:const MAX_TOTAL_TOOL_CALLS = 100;
+  src\agent.ts:53:
+  src\agent.ts:54:const DEFAULT_TEMPERATURE = 0.12;
+  src\agent.ts:55:
+  src\agent.ts:56:const MAX_TOOL_RESULT_CHARS = 14000;
+  src\agent.ts:57:const MAX_ERROR_CHARS = 4000;
+  src\agent.ts:58:
+  src\agent.ts:59:const MAX_CONSECUTIVE_FAILURES = 4;
+  src\agent.ts:60:const MAX_RECOVERY_ATTEMPTS = 6;
+  src\agent.ts:61:
+  src\agent.ts:62:const MAX_HISTORY_MESSAGES = 80;
+  src\agent.ts:63:
+  src\agent.ts:64:/* ============================================================================
+  src\agent.ts:65: * PHASES
+  src\agent.ts:66: * ========================================================================== */
+  src\agent.ts:67:
+  src\agent.ts:68:type AgentPhase =
+  src\agent.ts:69:  | "understand"
+  src\agent.ts:70:  | "inspect"
+  src\agent.ts:71:  | "plan"
+  src\agent.ts:72:  | "build"
+> src\agent.ts:73:  | "execute"
+  src\agent.ts:74:  | "test"
+  src\agent.ts:75:  | "debug"
+  src\agent.ts:76:  | "verify"
+  src\agent.ts:77:  | "complete"
+  src\agent.ts:78:  | "failed";
+  src\agent.ts:79:
+  src\agent.ts:80:type TaskIntent =
+  src\agent.ts:81:  | "chat"
+  src\agent.ts:82:  | "coding"
+  src\agent.ts:83:  | "building"
+  src\agent.ts:84:  | "debugging"
+  src\agent.ts:85:  | "testing"
+  src\agent.ts:86:  | "inspection"
+  src\agent.ts:87:  | "planning"
+  src\agent.ts:88:  | "analysis";
+  src\agent.ts:89:
+  src\agent.ts:90:/* ============================================================================
+  src\agent.ts:91: * PLAN TYPES
+  src\agent.ts:92: * ========================================================================== */
+  src\agent.ts:93:
+  src\agent.ts:94:interface SuccessCriterion {
+  src\agent.ts:95:  id: string;
+  src\agent.ts:96:  description: string;
+  src\agent.ts:97:  required: boolean;
+  src\agent.ts:98:}
+  src\agent.ts:99:
+  src\agent.ts:100:interface AgentPlan {
+  src\agent.ts:101:  intent: TaskIntent;
+  src\agent.ts:102:
+  src\agent.ts:103:  capability: ModelCapability;
+  src\agent.ts:104:
+  src\agent.ts:105:  objective: string;
+  src\agent.ts:106:
+  src\agent.ts:107:  needsRoblox: boolean;
+  src\agent.ts:108:  needsFiles: boolean;
+  src\agent.ts:109:  needsTerminal: boolean;
+  src\agent.ts:110:
+  src\agent.ts:111:  requiresInspection: boolean;
+  src\agent.ts:112:  requiresBuild: boolean;
+  src\agent.ts:113:  requiresTesting: boolean;
+> src\agent.ts:114:  requiresVerification: boolean;
+  src\agent.ts:115:
+  src\agent.ts:116:  destructiveRequested: boolean;
+  src\agent.ts:117:
+  src\agent.ts:118:  /**
+  src\agent.ts:119:   * True when the user explicitly asked the agent not to modify/build/
+  src\agent.ts:120:   * change/create ANYTHING, unscoped (e.g. "Do not modify anything",
+  src\agent.ts:121:   * "read-only"). This is a hard safety flag, separate from
+  src\agent.ts:122:   * requiresBuild, so it survives even if intent detection elsewhere
+  src\agent.ts:123:   * misfires.
+  src\agent.ts:124:   *
+  src\agent.ts:125:   * Deliberately narrower than earlier versions: a SCOPED protection
+  src\agent.ts:126:   * ("do not modify the existing house") does NOT set this — see
+  src\agent.ts:127:   * `protectedTargets` below. Only an unscoped negation ("anything" /
+  src\agent.ts:128:   * "everything" / bare "read-only") counts as full read-only, so a
+  src\agent.ts:129:   * request that also asks for a real build isn't wrongly blocked
+  src\agent.ts:130:   * wholesale. See detectFullReadOnlyIntent in ./agent/studio-context.ts.
+  src\agent.ts:131:   */
+  src\agent.ts:132:  explicitReadOnly: boolean;
+  src\agent.ts:133:
+  src\agent.ts:134:  /**
+  src\agent.ts:135:   * Free-text targets the user asked NOT to be touched, alongside an
+  src\agent.ts:136:   * otherwise-permitted request (e.g. "the existing house" from
+  src\agent.ts:137:   * "build a bed but do not modify the existing house"). This is
+  src\agent.ts:138:   * surfaced to the model as an instruction to respect, not enforced
+  src\agent.ts:139:   * as a hard per-object tool block — the architecture has no way to
+  src\agent.ts:159:  name: string;
+  src\agent.ts:160:  input: unknown;
+  src\agent.ts:161:
+  src\agent.ts:162:  success: boolean;
+  src\agent.ts:163:
+  src\agent.ts:164:  data?: unknown;
+  src\agent.ts:165:  error?: string;
+  src\agent.ts:166:
+  src\agent.ts:167:  iteration: number;
+  src\agent.ts:168:  phase: AgentPhase;
+  src\agent.ts:169:
+  src\agent.ts:170:  startedAt: string;
+  src\agent.ts:171:  finishedAt: string;
+  src\agent.ts:172:}
+  src\agent.ts:173:
+> src\agent.ts:174:interface VerificationCheck {
+  src\agent.ts:175:  id: string;
+  src\agent.ts:176:
+  src\agent.ts:177:  description: string;
+  src\agent.ts:178:
+  src\agent.ts:179:  passed: boolean;
+  src\agent.ts:180:
+  src\agent.ts:181:  evidence: string[];
+  src\agent.ts:182:
+  src\agent.ts:183:  sourceTools: string[];
+  src\agent.ts:184:}
+  src\agent.ts:185:
+> src\agent.ts:186:interface VerificationState {
+  src\agent.ts:187:  required: boolean;
+  src\agent.ts:188:
+  src\agent.ts:189:  attempted: boolean;
+  src\agent.ts:190:
+  src\agent.ts:191:  passed: boolean;
+  src\agent.ts:192:
+> src\agent.ts:193:  checks: VerificationCheck[];
+  src\agent.ts:194:
+  src\agent.ts:195:  evidence: string[];
+  src\agent.ts:196:
+  src\agent.ts:197:  reason: string;
+  src\agent.ts:198:}
+  src\agent.ts:199:
+  src\agent.ts:200:interface AgentError {
+  src\agent.ts:201:  phase: AgentPhase;
+  src\agent.ts:202:
+  src\agent.ts:203:  message: string;
+  src\agent.ts:204:
+  src\agent.ts:205:  tool?: string;
+  src\agent.ts:206:
+  src\agent.ts:207:  recoverable: boolean;
+  src\agent.ts:208:
+  src\agent.ts:209:  timestamp: string;
+  src\agent.ts:210:}
+  src\agent.ts:211:
+  src\agent.ts:212:interface AgentState {
+  src\agent.ts:213:  task: AgentTask;
+  src\agent.ts:214:
+  src\agent.ts:215:  plan: AgentPlan;
+  src\agent.ts:216:
+  src\agent.ts:217:  phase: AgentPhase;
+  src\agent.ts:218:
+  src\agent.ts:219:  messages: AIMessage[];
+  src\agent.ts:220:
+  src\agent.ts:221:  iterations: number;
+  src\agent.ts:222:
+  src\agent.ts:223:  totalToolCalls: number;
+  src\agent.ts:224:
+> src\agent.ts:225:  executedTools: ToolExecution[];
+  src\agent.ts:226:
+  src\agent.ts:227:  errors: AgentError[];
+  src\agent.ts:228:
+> src\agent.ts:229:  verification: VerificationState;
+  src\agent.ts:230:
+  src\agent.ts:231:  recoveryAttempts: number;
+  src\agent.ts:232:
+  src\agent.ts:233:  /**
+  src\agent.ts:234:   * Counts consecutive iterations where the agent needed the model to
+  src\agent.ts:235:   * take a recovery action (a required evidence category is still
+  src\agent.ts:236:   * unsatisfied) but the model returned no tool call at all — i.e. no
+  src\agent.ts:237:   * actual progress was attempted. Reset to 0 whenever a tool call
+> src\agent.ts:238:   * batch actually executes. Used to fail fast instead of burning
+  src\agent.ts:239:   * through MAX_RECOVERY_ATTEMPTS on iterations that do nothing.
+  src\agent.ts:240:   */
+  src\agent.ts:241:  noProgressRecoveryStreak: number;
+  src\agent.ts:242:
+  src\agent.ts:243:  /**
+  src\agent.ts:244:   * Signatures ("toolName:JSON(args)") of tool calls that have already
+  src\agent.ts:245:   * failed with these exact arguments. Used to block verbatim repeats
+  src\agent.ts:246:   * of a known-failing call instead of letting the model retry the
+  src\agent.ts:247:   * same broken input again. Computed from the MODEL-PROVIDED (raw,
+  src\agent.ts:248:   * pre-injection) arguments, so it is unaffected by automatic
+  src\agent.ts:249:   * studio_id injection below.
+  src\agent.ts:250:   */
+  src\agent.ts:251:  failedCallSignatures: Set<string>;
+  src\agent.ts:252:
+  src\agent.ts:253:  consecutiveFailures: number;
+  src\agent.ts:254:
+  src\agent.ts:255:  completed: boolean;
+  src\agent.ts:256:
+  src\agent.ts:257:  failed: boolean;
+  src\agent.ts:258:
+  src\agent.ts:259:  finalContent: string;
+  src\agent.ts:260:
+  src\agent.ts:261:  /**
+  src\agent.ts:262:   * Deterministic, runtime-owned Roblox Studio session context. The
+  src\agent.ts:263:   * model is never asked to discover or remember studio_id itself —
+> src\agent.ts:264:   * see ensureRobloxStudioContext().
+  src\agent.ts:265:   */
+> src\agent.ts:266:  studioContext: RobloxStudioContext;
+  src\agent.ts:267:}
+  src\agent.ts:268:
+  src\agent.ts:269:/* ============================================================================
+  src\agent.ts:270: * AGENT
+  src\agent.ts:271: * ========================================================================== */
+  src\agent.ts:272:
+  src\agent.ts:273:export class Agent {
+  src\agent.ts:274:  private readonly router: ModelRouter;
+  src\agent.ts:275:
+> src\agent.ts:276:  private readonly tools: ToolRegistry;
+  src\agent.ts:277:
+  src\agent.ts:278:  private readonly sessionId: string;
+  src\agent.ts:279:
+  src\agent.ts:280:  constructor(
+  src\agent.ts:281:    router: ModelRouter,
+> src\agent.ts:282:    tools: ToolRegistry,
+  src\agent.ts:283:  ) {
+  src\agent.ts:284:    this.router = router;
+  src\agent.ts:285:    this.tools = tools;
+  src\agent.ts:286:
+  src\agent.ts:287:    /*
+  src\agent.ts:288:     * IMPORTANT:
+  src\agent.ts:289:     * Session IDs belong to the Agent instance, not the module.
+  src\agent.ts:290:     */
+  src\agent.ts:291:    this.sessionId = crypto.randomUUID();
+  src\agent.ts:292:  }
+  src\agent.ts:293:
+  src\agent.ts:294:  /* ==========================================================================
+  src\agent.ts:295:   * PUBLIC API
+  src\agent.ts:296:   * ======================================================================== */
+  src\agent.ts:297:
+  src\agent.ts:298:  async run(userMessage: string): Promise<AgentResponse> {
+  src\agent.ts:299:    const message = userMessage.trim();
+  src\agent.ts:300:
+  src\agent.ts:301:    if (!message) {
+  src\agent.ts:302:      throw new Error(
+  src\agent.ts:303:        "Agent cannot run an empty request.",
+  src\agent.ts:304:      );
+  src\agent.ts:305:    }
+  src\agent.ts:306:
+  src\agent.ts:307:    const task: AgentTask = {
+  src\agent.ts:319:    task.capability = plan.capability;
+  src\agent.ts:320:
+  src\agent.ts:321:    const state: AgentState = {
+  src\agent.ts:322:      task,
+  src\agent.ts:323:
+  src\agent.ts:324:      plan,
+  src\agent.ts:325:
+  src\agent.ts:326:      phase: "understand",
+  src\agent.ts:327:
+  src\agent.ts:328:      messages: [],
+  src\agent.ts:329:
+  src\agent.ts:330:      iterations: 0,
+  src\agent.ts:331:
+  src\agent.ts:332:      totalToolCalls: 0,
+  src\agent.ts:333:
+> src\agent.ts:334:      executedTools: [],
+  src\agent.ts:335:
+  src\agent.ts:336:      errors: [],
+  src\agent.ts:337:
+> src\agent.ts:338:      verification: {
+> src\agent.ts:339:        required: plan.requiresVerification,
+  src\agent.ts:340:
+  src\agent.ts:341:        attempted: false,
+  src\agent.ts:342:
+  src\agent.ts:343:        passed: false,
+  src\agent.ts:344:
+  src\agent.ts:345:        checks: [],
+  src\agent.ts:346:
+  src\agent.ts:347:        evidence: [],
+  src\agent.ts:348:
+  src\agent.ts:349:        reason: "",
+  src\agent.ts:350:      },
+  src\agent.ts:351:
+  src\agent.ts:352:      recoveryAttempts: 0,
+  src\agent.ts:353:
+  src\agent.ts:354:      noProgressRecoveryStreak: 0,
+  src\agent.ts:355:
+  src\agent.ts:356:      failedCallSignatures: new Set<string>(),
+  src\agent.ts:357:
+  src\agent.ts:358:      consecutiveFailures: 0,
+  src\agent.ts:359:
+  src\agent.ts:360:      completed: false,
+  src\agent.ts:361:
+  src\agent.ts:362:      failed: false,
+  src\agent.ts:363:
+  src\agent.ts:364:      finalContent: "",
+  src\agent.ts:365:
+> src\agent.ts:366:      studioContext: {
+  src\agent.ts:367:        status: "not-needed",
+  src\agent.ts:368:      },
+  src\agent.ts:369:    };
+  src\agent.ts:370:
+  src\agent.ts:371:    this.printTaskHeader(state);
+  src\agent.ts:372:
+  src\agent.ts:373:    const selectedModel =
+  src\agent.ts:374:      this.router.getModel(
+  src\agent.ts:375:        plan.capability,
+  src\agent.ts:376:      );
+  src\agent.ts:377:
+  src\agent.ts:378:    const provider = selectedModel.provider;
+  src\agent.ts:379:    const model = selectedModel.model;
+  src\agent.ts:380:
+  src\agent.ts:381:    state.messages =
+  src\agent.ts:382:      this.createInitialMessages(state);
+  src\agent.ts:383:
+  src\agent.ts:384:    /*
+  src\agent.ts:385:     * ================================================================
+  src\agent.ts:386:     * ROBLOX STUDIO CONTEXT BOOTSTRAP
+  src\agent.ts:387:     * ================================================================
+  src\agent.ts:388:     *
+  src\agent.ts:389:     * Deterministic, runtime-owned session resolution — NOT delegated
+  src\agent.ts:390:     * to the model. Only triggered when the plan actually needs to
+  src\agent.ts:391:     * interact with a live Studio (inspect/build/test), not for plain
+  src\agent.ts:392:     * Roblox-flavored chat that never touches a tool.
+  src\agent.ts:393:     */
+  src\agent.ts:394:
+  src\agent.ts:395:    const needsActiveStudio =
+  src\agent.ts:396:      plan.needsRoblox &&
+  src\agent.ts:397:      (
+  src\agent.ts:398:        plan.requiresInspection ||
+  src\agent.ts:399:        plan.requiresBuild ||
+  src\agent.ts:400:        plan.requiresTesting
+  src\agent.ts:401:      );
+  src\agent.ts:402:
+  src\agent.ts:403:    if (needsActiveStudio) {
+> src\agent.ts:404:      await this.ensureRobloxStudioContext(
+  src\agent.ts:405:        state,
+  src\agent.ts:406:      );
+  src\agent.ts:407:
+> src\agent.ts:408:      this.printStudioContext(state);
+  src\agent.ts:409:
+  src\agent.ts:410:      if (
+> src\agent.ts:411:        state.studioContext.status ===
+  src\agent.ts:412:        "unavailable"
+  src\agent.ts:413:      ) {
+  src\agent.ts:414:        this.fail(
+  src\agent.ts:415:          state,
+> src\agent.ts:416:          state.studioContext.error ??
+  src\agent.ts:417:            "Roblox Studio context could not be resolved.",
+  src\agent.ts:418:          false,
+  src\agent.ts:419:        );
+  src\agent.ts:420:
+  src\agent.ts:421:        state.finalContent =
+  src\agent.ts:422:          this.buildFailureResponse(
+  src\agent.ts:423:            state,
+  src\agent.ts:424:          );
+  src\agent.ts:425:
+  src\agent.ts:426:        return {
+  src\agent.ts:427:          taskId: task.id,
+  src\agent.ts:428:          content: state.finalContent,
+  src\agent.ts:429:          model,
+  src\agent.ts:430:          provider: provider.name,
+  src\agent.ts:431:          success: false,
+  src\agent.ts:432:        };
+  src\agent.ts:433:      }
+  src\agent.ts:434:    }
+  src\agent.ts:435:
+  src\agent.ts:436:    /*
+  src\agent.ts:437:     * ================================================================
+  src\agent.ts:438:     * MAIN AGENT LOOP
+  src\agent.ts:439:     * ================================================================
+  src\agent.ts:440:     */
+  src\agent.ts:441:
+  src\agent.ts:525:        /*
+  src\agent.ts:526:         * ------------------------------------------------------------
+  src\agent.ts:527:         * TOOL EXECUTION
+  src\agent.ts:528:         * ------------------------------------------------------------
+  src\agent.ts:529:         */
+  src\agent.ts:530:
+  src\agent.ts:531:        if (toolCalls.length > 0) {
+  src\agent.ts:532:          state.noProgressRecoveryStreak = 0;
+  src\agent.ts:533:
+  src\agent.ts:534:          const limitedCalls =
+  src\agent.ts:535:            toolCalls.slice(
+  src\agent.ts:536:              0,
+  src\agent.ts:537:              MAX_TOOL_CALLS_PER_ITERATION,
+  src\agent.ts:538:            );
+  src\agent.ts:539:
+> src\agent.ts:540:          await this.executeToolCalls(
+  src\agent.ts:541:            state,
+  src\agent.ts:542:            limitedCalls,
+  src\agent.ts:543:          );
+  src\agent.ts:544:
+  src\agent.ts:545:          /*
+  src\agent.ts:546:           * Never finish directly after a tool call.
+  src\agent.ts:547:           * The model must observe the result first.
+  src\agent.ts:548:           */
+  src\agent.ts:549:          continue;
+  src\agent.ts:550:        }
+  src\agent.ts:551:
+  src\agent.ts:552:        /*
+  src\agent.ts:553:         * ------------------------------------------------------------
+  src\agent.ts:554:         * NO TOOL CALL
+  src\agent.ts:555:         * ------------------------------------------------------------
+  src\agent.ts:556:         */
+  src\agent.ts:557:
+  src\agent.ts:558:        const content =
+  src\agent.ts:559:          assistantMessage.content
+  src\agent.ts:560:            ?.trim() ?? "";
+  src\agent.ts:561:
+  src\agent.ts:562:        if (
+  src\agent.ts:563:          this.requiresEvidenceBeforeCompletion(
+  src\agent.ts:564:            state,
+  src\agent.ts:565:          )
+  src\agent.ts:566:        ) {
+  src\agent.ts:567:          state.finalContent =
+  src\agent.ts:568:            content;
+  src\agent.ts:569:
+  src\agent.ts:570:          state.phase = "verify";
+  src\agent.ts:571:
+> src\agent.ts:572:          const verification =
+  src\agent.ts:573:            await this.verifyTask(
+  src\agent.ts:574:              state,
+  src\agent.ts:575:              provider,
+  src\agent.ts:576:              model,
+  src\agent.ts:577:            );
+  src\agent.ts:578:
+> src\agent.ts:579:          if (verification.passed) {
+> src\agent.ts:580:            state.verification =
+> src\agent.ts:581:              verification;
+  src\agent.ts:582:
+  src\agent.ts:583:            state.completed = true;
+  src\agent.ts:584:
+  src\agent.ts:585:            state.phase = "complete";
+  src\agent.ts:586:
+  src\agent.ts:587:            state.finalContent =
+  src\agent.ts:588:              this.buildSuccessfulResponse(
+  src\agent.ts:589:                state,
+  src\agent.ts:590:                content,
+  src\agent.ts:591:              );
+  src\agent.ts:592:
+  src\agent.ts:593:            break;
+  src\agent.ts:594:          }
+  src\agent.ts:595:
+> src\agent.ts:596:          state.verification =
+> src\agent.ts:597:            verification;
+  src\agent.ts:598:
+  src\agent.ts:599:          state.errors.push({
+  src\agent.ts:600:            phase: "verify",
+  src\agent.ts:601:
+  src\agent.ts:602:            message:
+> src\agent.ts:603:              verification.reason,
+  src\agent.ts:604:
+  src\agent.ts:605:            recoverable: true,
+  src\agent.ts:606:
+  src\agent.ts:607:            timestamp:
+  src\agent.ts:608:              new Date().toISOString(),
+  src\agent.ts:609:          });
+  src\agent.ts:610:
+  src\agent.ts:611:          if (
+  src\agent.ts:612:            state.recoveryAttempts <
+  src\agent.ts:613:            MAX_RECOVERY_ATTEMPTS
+  src\agent.ts:614:          ) {
+  src\agent.ts:615:            state.recoveryAttempts++;
+  src\agent.ts:616:
+  src\agent.ts:617:            state.phase = "debug";
+  src\agent.ts:618:
+  src\agent.ts:619:            state.messages.push({
+  src\agent.ts:620:              role: "user",
+  src\agent.ts:621:
+  src\agent.ts:622:              content: `
+> src\agent.ts:623:Verification did not confirm completion.
+  src\agent.ts:624:
+  src\agent.ts:625:Reason:
+  src\agent.ts:626:${this.truncate(
+> src\agent.ts:627:  verification.reason,
+  src\agent.ts:628:  MAX_ERROR_CHARS,
+  src\agent.ts:629:)}
+  src\agent.ts:630:
+  src\agent.ts:631:Do not claim completion.
+  src\agent.ts:632:
+  src\agent.ts:633:Recover from the failure.
+  src\agent.ts:634:Inspect the current state if necessary.
+  src\agent.ts:635:Use another appropriate tool or correct the previous action.
+  src\agent.ts:636:Continue until the user's requested outcome is actually achieved and verifiable.
+  src\agent.ts:637:`,
+  src\agent.ts:638:            });
+  src\agent.ts:639:
+  src\agent.ts:640:            continue;
+  src\agent.ts:641:          }
+  src\agent.ts:642:
+  src\agent.ts:643:          this.fail(
+  src\agent.ts:644:            state,
+> src\agent.ts:645:            "Verification failed repeatedly.",
+  src\agent.ts:646:            true,
+  src\agent.ts:647:          );
+  src\agent.ts:648:
+  src\agent.ts:649:          break;
+  src\agent.ts:650:        }
+  src\agent.ts:651:
+  src\agent.ts:652:        /*
+  src\agent.ts:653:         * ------------------------------------------------------------
+  src\agent.ts:654:         * GENERAL "NOT ACTUALLY DONE YET" GATE
+  src\agent.ts:655:         * ------------------------------------------------------------
+  src\agent.ts:656:         *
+  src\agent.ts:657:         * requiresEvidenceBeforeCompletion() above only covers plans
+> src\agent.ts:658:         * that need build/testing/full verification. A plan that only
+> src\agent.ts:659:         * requires inspection (requiresVerification=false) had no gate
+  src\agent.ts:660:         * at all here — the model's plain text was accepted as final
+  src\agent.ts:661:         * the moment it stopped calling tools, even right after the
+  src\agent.ts:662:         * only tool call it made had failed. This closes that gap
+  src\agent.ts:663:         * generically, for any required category, not a specific tool.
+  src\agent.ts:664:         */
+  src\agent.ts:665:
+  src\agent.ts:666:        const unsatisfied =
+  src\agent.ts:667:          this.getUnsatisfiedRequirements(
+  src\agent.ts:668:            state,
+  src\agent.ts:669:          );
+  src\agent.ts:670:
+  src\agent.ts:671:        if (unsatisfied.length > 0) {
+  src\agent.ts:672:          state.errors.push({
+  src\agent.ts:673:            phase: state.phase,
+  src\agent.ts:674:
+  src\agent.ts:675:            message: `Task not yet satisfied: ${unsatisfied.join("; ")}`,
+  src\agent.ts:676:
+  src\agent.ts:677:            recoverable: true,
+  src\agent.ts:678:
+  src\agent.ts:679:            timestamp:
+  src\agent.ts:680:              new Date().toISOString(),
+  src\agent.ts:681:          });
+  src\agent.ts:682:
+  src\agent.ts:683:          state.noProgressRecoveryStreak++;
+  src\agent.ts:684:
+  src\agent.ts:827:  provider: provider.name,
+  src\agent.ts:828:  success: state.completed && !state.failed,
+  src\agent.ts:829:};
+  src\agent.ts:830:}
+  src\agent.ts:831: 
+  src\agent.ts:832:/* ==========================================================================
+  src\agent.ts:833: * ROBLOX STUDIO CONTEXT
+  src\agent.ts:834: * ======================================================================== */
+  src\agent.ts:835:
+  src\agent.ts:836:  /**
+  src\agent.ts:837:   * Resolves (or reuses) the active Roblox Studio session, deterministically,
+  src\agent.ts:838:   * using the discovery tool the tool registry exposes — never by asking the
+  src\agent.ts:839:   * model to figure it out. See ./agent/studio-context.ts for the pure
+  src\agent.ts:840:   * parsing helpers this delegates to.
+  src\agent.ts:841:   */
+> src\agent.ts:842:  private async ensureRobloxStudioContext(
+  src\agent.ts:843:    state: AgentState,
+  src\agent.ts:844:  ): Promise<void> {
+  src\agent.ts:845:    if (!state.plan.needsRoblox) {
+> src\agent.ts:846:      state.studioContext = {
+  src\agent.ts:847:        status: "not-needed",
+  src\agent.ts:848:      };
+  src\agent.ts:849:
+  src\agent.ts:850:      return;
+  src\agent.ts:851:    }
+  src\agent.ts:852:
+  src\agent.ts:853:    if (
+> src\agent.ts:854:      state.studioContext.status ===
+  src\agent.ts:855:        "resolved" &&
+> src\agent.ts:856:      state.studioContext.studioId
+  src\agent.ts:857:    ) {
+  src\agent.ts:858:      return;
+  src\agent.ts:859:    }
+  src\agent.ts:860:
+  src\agent.ts:861:    const discoveryTool =
+  src\agent.ts:862:      this.findStudioDiscoveryToolName();
+  src\agent.ts:863:
+  src\agent.ts:864:    if (!discoveryTool) {
+> src\agent.ts:865:      state.studioContext = {
+  src\agent.ts:866:        status: "unresolved",
+  src\agent.ts:867:        error:
+  src\agent.ts:868:          "No Roblox Studio discovery tool is registered.",
+  src\agent.ts:869:      };
+  src\agent.ts:870:
+  src\agent.ts:871:      return;
+  src\agent.ts:872:    }
+  src\agent.ts:873:
+  src\agent.ts:874:    const result =
+> src\agent.ts:875:      await this.tools.execute(
+  src\agent.ts:876:        discoveryTool,
+  src\agent.ts:877:        {},
+  src\agent.ts:878:        {
+  src\agent.ts:879:          sessionId:
+  src\agent.ts:880:            this.sessionId,
+  src\agent.ts:881:        },
+  src\agent.ts:882:      );
+  src\agent.ts:883:
+  src\agent.ts:884:    this.printStudioDiscoveryAttempt(
+  src\agent.ts:885:      discoveryTool,
+  src\agent.ts:886:      result,
+  src\agent.ts:887:    );
+  src\agent.ts:888:
+  src\agent.ts:889:    if (!result.success) {
+> src\agent.ts:890:      state.studioContext = {
+  src\agent.ts:891:        status: "unavailable",
+  src\agent.ts:892:        error:
+  src\agent.ts:893:          result.error ??
+  src\agent.ts:894:          "Studio discovery failed.",
+  src\agent.ts:895:      };
+  src\agent.ts:896:
+  src\agent.ts:897:      return;
+  src\agent.ts:898:    }
+  src\agent.ts:899:
+  src\agent.ts:900:    const candidates =
+  src\agent.ts:901:      extractStudioCandidates(
+  src\agent.ts:902:        result.data,
+  src\agent.ts:903:      );
+  src\agent.ts:904:
+  src\agent.ts:905:    if (candidates.length === 0) {
+> src\agent.ts:906:      state.studioContext = {
+  src\agent.ts:907:        status: "unavailable",
+  src\agent.ts:908:        availableStudios: [],
+  src\agent.ts:909:        error:
+  src\agent.ts:910:          "No connected Roblox Studio instance was found.",
+  src\agent.ts:911:      };
+  src\agent.ts:912:
+  src\agent.ts:913:      return;
+  src\agent.ts:914:    }
+  src\agent.ts:915:
+  src\agent.ts:916:    if (candidates.length === 1) {
+> src\agent.ts:917:      state.studioContext = {
+  src\agent.ts:918:        status: "resolved",
+  src\agent.ts:919:        studioId: candidates[0].id,
+  src\agent.ts:920:        studioName:
+  src\agent.ts:921:          candidates[0].name,
+  src\agent.ts:922:        availableStudios:
+  src\agent.ts:923:          candidates,
+  src\agent.ts:924:      };
+  src\agent.ts:925:
+  src\agent.ts:926:      return;
+  src\agent.ts:927:    }
+  src\agent.ts:928:
+  src\agent.ts:929:    /*
+  src\agent.ts:930:     * Multiple Studios open. Do not guess — look for an explicit
+  src\agent.ts:931:     * active/focused/current signal in the raw discovery result
+  src\agent.ts:932:     * before giving up and asking the user to disambiguate.
+  src\agent.ts:933:     */
+  src\agent.ts:934:    const active =
+> src\agent.ts:935:      findActiveStudioCandidate(
+  src\agent.ts:936:        result.data,
+  src\agent.ts:937:        candidates,
+  src\agent.ts:938:      );
+  src\agent.ts:939:
+  src\agent.ts:940:    if (active) {
+> src\agent.ts:941:      state.studioContext = {
+  src\agent.ts:942:        status: "resolved",
+  src\agent.ts:943:        studioId: active.id,
+  src\agent.ts:944:        studioName: active.name,
+  src\agent.ts:945:        availableStudios:
+  src\agent.ts:946:          candidates,
+  src\agent.ts:947:      };
+  src\agent.ts:948:
+  src\agent.ts:949:      return;
+  src\agent.ts:950:    }
+  src\agent.ts:951:
+> src\agent.ts:952:    state.studioContext = {
+  src\agent.ts:953:      status: "unavailable",
+  src\agent.ts:954:      availableStudios: candidates,
+  src\agent.ts:955:      error: `Multiple Roblox Studio instances are open (${candidates.length}) 
+and none is marked active/focused. Ask the user which one to use.`,
+  src\agent.ts:956:    };
+  src\agent.ts:957:  }
+  src\agent.ts:958:
+  src\agent.ts:959:  /**
+  src\agent.ts:960:   * Finds the registered tool responsible for listing/discovering open
+  src\agent.ts:961:   * Roblox Studio instances, by name pattern rather than a single
+  src\agent.ts:962:   * hardcoded literal — so a differently-named but equivalent MCP tool
+  src\agent.ts:963:   * is still found.
+  src\agent.ts:964:   */
+  src\agent.ts:965:  private findStudioDiscoveryToolName():
+  src\agent.ts:966:    | string
+  src\agent.ts:967:    | null {
+  src\agent.ts:968:    const candidates =
+  src\agent.ts:969:      this.tools.getAIDefinitions([
+  src\agent.ts:970:        "roblox-inspection",
+  src\agent.ts:971:      ]);
+  src\agent.ts:972:
+  src\agent.ts:973:    const match = candidates.find(
+  src\agent.ts:974:      (definition) => {
+  src\agent.ts:975:        const name =
+  src\agent.ts:976:          definition.function.name.toLowerCase();
+  src\agent.ts:977:
+  src\agent.ts:989:  /**
+  src\agent.ts:990:   * Schema-driven studio_id injection: looks at the ACTUAL registered
+  src\agent.ts:991:   * tool's JSON schema for a studio_id-shaped property, rather than a
+  src\agent.ts:992:   * hardcoded list of tool names. Never overwrites a valid value the
+  src\agent.ts:993:   * model already supplied.
+  src\agent.ts:994:   */
+  src\agent.ts:995:  private normalizeToolArguments(
+  src\agent.ts:996:    toolName: string,
+  src\agent.ts:997:    args: Record<string, unknown>,
+  src\agent.ts:998:    state: AgentState,
+  src\agent.ts:999:  ): {
+  src\agent.ts:1000:    normalized: Record<string, unknown>;
+  src\agent.ts:1001:    studioIdInjected: boolean;
+  src\agent.ts:1002:  } {
+  src\agent.ts:1003:    if (
+> src\agent.ts:1004:      state.studioContext.status !==
+  src\agent.ts:1005:        "resolved" ||
+> src\agent.ts:1006:      !state.studioContext.studioId
+  src\agent.ts:1007:    ) {
+  src\agent.ts:1008:      return {
+  src\agent.ts:1009:        normalized: args,
+  src\agent.ts:1010:        studioIdInjected: false,
+  src\agent.ts:1011:      };
+  src\agent.ts:1012:    }
+  src\agent.ts:1013:
+  src\agent.ts:1014:    if (
+  src\agent.ts:1015:      toolName ===
+  src\agent.ts:1016:      this.findStudioDiscoveryToolName()
+  src\agent.ts:1017:    ) {
+  src\agent.ts:1018:      return {
+  src\agent.ts:1019:        normalized: args,
+  src\agent.ts:1020:        studioIdInjected: false,
+  src\agent.ts:1021:      };
+  src\agent.ts:1022:    }
+  src\agent.ts:1023:
+  src\agent.ts:1024:    const group =
+  src\agent.ts:1025:      this.tools.getGroup(toolName);
+  src\agent.ts:1026:
+  src\agent.ts:1027:    if (
+  src\agent.ts:1028:      !group ||
+  src\agent.ts:1029:      !group.startsWith("roblox")
+  src\agent.ts:1030:    ) {
+  src\agent.ts:1031:      return {
+  src\agent.ts:1047:        .parameters as
+  src\agent.ts:1048:        | {
+  src\agent.ts:1049:            properties?: Record<
+  src\agent.ts:1050:              string,
+  src\agent.ts:1051:              unknown
+  src\agent.ts:1052:            >;
+  src\agent.ts:1053:          }
+  src\agent.ts:1054:        | undefined
+  src\agent.ts:1055:    )?.properties;
+  src\agent.ts:1056:
+  src\agent.ts:1057:    const studioIdKey =
+  src\agent.ts:1058:      findStudioIdParameterKey(
+  src\agent.ts:1059:        properties,
+  src\agent.ts:1060:      );
+  src\agent.ts:1061:
+> src\agent.ts:1062:    return normalizeRobloxToolArguments(
+  src\agent.ts:1063:      args,
+  src\agent.ts:1064:      studioIdKey,
+> src\agent.ts:1065:      state.studioContext.studioId,
+  src\agent.ts:1066:    );
+  src\agent.ts:1067:  }
+  src\agent.ts:1068:
+  src\agent.ts:1069:  /* ==========================================================================
+  src\agent.ts:1070:   * PLAN
+  src\agent.ts:1071:   * ======================================================================== */
+  src\agent.ts:1072:
+  src\agent.ts:1073:private createInitialPlan(
+  src\agent.ts:1074:    message: string,
+  src\agent.ts:1075:  ): AgentPlan {
+  src\agent.ts:1076:    const normalized =
+  src\agent.ts:1077:      message.toLowerCase();
+  src\agent.ts:1078:
+  src\agent.ts:1079:    const needsRoblox =
+  src\agent.ts:1080:      this.detectRobloxIntent(
+  src\agent.ts:1081:        normalized,
+  src\agent.ts:1082:      );
+  src\agent.ts:1083:
+  src\agent.ts:1084:    const needsFiles =
+  src\agent.ts:1085:      this.detectFileIntent(
+  src\agent.ts:1086:        normalized,
+  src\agent.ts:1087:      );
+  src\agent.ts:1088:
+  src\agent.ts:1089:    const needsTerminal =
+  src\agent.ts:1090:      this.detectTerminalIntent(
+  src\agent.ts:1156:      );
+  src\agent.ts:1157:
+  src\agent.ts:1158:    const requiresInspection =
+  src\agent.ts:1159:      needsRoblox &&
+  src\agent.ts:1160:      (
+  src\agent.ts:1161:        requiresBuild ||
+  src\agent.ts:1162:        requiresTesting ||
+  src\agent.ts:1163:        debugging ||
+  src\agent.ts:1164:        planning ||
+  src\agent.ts:1165:        analysis ||
+  src\agent.ts:1166:        this.detectInspectionIntent(
+  src\agent.ts:1167:          normalized,
+  src\agent.ts:1168:        )
+  src\agent.ts:1169:      );
+  src\agent.ts:1170:
+> src\agent.ts:1171:    const requiresVerification =
+  src\agent.ts:1172:      needsRoblox &&
+  src\agent.ts:1173:      (
+  src\agent.ts:1174:        requiresBuild ||
+  src\agent.ts:1175:        requiresTesting ||
+  src\agent.ts:1176:        debugging ||
+  src\agent.ts:1177:        planning ||
+  src\agent.ts:1178:        analysis
+  src\agent.ts:1179:      );
+  src\agent.ts:1180:
+  src\agent.ts:1181:    const destructiveRequested =
+  src\agent.ts:1182:      this.detectDestructiveIntent(
+  src\agent.ts:1183:        normalized,
+  src\agent.ts:1184:      );
+  src\agent.ts:1185:
+  src\agent.ts:1186:    const preferredToolGroups =
+  src\agent.ts:1187:      this.resolveToolGroups({
+  src\agent.ts:1188:        needsRoblox,
+  src\agent.ts:1189:
+  src\agent.ts:1190:        needsFiles,
+  src\agent.ts:1191:
+  src\agent.ts:1192:        needsTerminal,
+  src\agent.ts:1193:
+  src\agent.ts:1194:        requiresInspection,
+  src\agent.ts:1195:
+  src\agent.ts:1196:        requiresBuild,
+  src\agent.ts:1197:
+  src\agent.ts:1198:        requiresTesting,
+  src\agent.ts:1199:
+> src\agent.ts:1200:        requiresVerification,
+  src\agent.ts:1201:      });
+  src\agent.ts:1202:
+  src\agent.ts:1203:    const successCriteria =
+  src\agent.ts:1204:      this.buildSuccessCriteria({
+  src\agent.ts:1205:  message,
+  src\agent.ts:1206:  needsRoblox,
+  src\agent.ts:1207:  requiresInspection,
+  src\agent.ts:1208:  requiresBuild,
+  src\agent.ts:1209:  requiresTesting,
+> src\agent.ts:1210:  requiresVerification,
+  src\agent.ts:1211:  needsFiles,
+  src\agent.ts:1212:  needsTerminal,
+  src\agent.ts:1213:});
+  src\agent.ts:1214:
+  src\agent.ts:1215:    return {
+  src\agent.ts:1216:      intent,
+  src\agent.ts:1217:
+  src\agent.ts:1218:      capability,
+  src\agent.ts:1219:
+  src\agent.ts:1220:      objective: message,
+  src\agent.ts:1221:
+  src\agent.ts:1222:      needsRoblox,
+  src\agent.ts:1223:
+  src\agent.ts:1224:      needsFiles,
+  src\agent.ts:1225:
+  src\agent.ts:1226:      needsTerminal,
+  src\agent.ts:1227:
+  src\agent.ts:1228:      requiresInspection,
+  src\agent.ts:1229:
+  src\agent.ts:1230:      requiresBuild,
+  src\agent.ts:1231:
+  src\agent.ts:1232:      requiresTesting,
+  src\agent.ts:1233:
+> src\agent.ts:1234:      requiresVerification,
+  src\agent.ts:1235:
+  src\agent.ts:1236:      destructiveRequested,
+  src\agent.ts:1237:
+  src\agent.ts:1238:      explicitReadOnly,
+  src\agent.ts:1239:
+  src\agent.ts:1240:      protectedTargets,
+  src\agent.ts:1241:
+  src\agent.ts:1242:      successCriteria,
+  src\agent.ts:1243:
+  src\agent.ts:1244:      preferredToolGroups,
+  src\agent.ts:1245:
+  src\agent.ts:1246:      reason: needsRoblox
+  src\agent.ts:1247:        ? "The task targets Roblox Studio or Roblox development."
+  src\agent.ts:1248:        : "The task does not require direct Roblox execution.",
+  src\agent.ts:1249:    };
+  src\agent.ts:1250:  }
+  src\agent.ts:1251:
+  src\agent.ts:1252:  /* ==========================================================================
+  src\agent.ts:1253:   * PHASE ENGINE
+  src\agent.ts:1254:   * ======================================================================== */
+  src\agent.ts:1255:
+  src\agent.ts:1256:  private selectNextPhase(
+  src\agent.ts:1257:    state: AgentState,
+  src\agent.ts:1258:  ): AgentPhase {
+  src\agent.ts:1259:    if (state.completed) {
+  src\agent.ts:1260:      return "complete";
+  src\agent.ts:1261:    }
+  src\agent.ts:1262:
+  src\agent.ts:1263:    if (state.failed) {
+  src\agent.ts:1264:      return "failed";
+  src\agent.ts:1265:    }
+  src\agent.ts:1266:
+  src\agent.ts:1267:    /*
+  src\agent.ts:1268:     * ------------------------------------------------------------
+  src\agent.ts:1269:     * ORDERING NOTE (bug fix, kept from the previous review):
+  src\agent.ts:1270:     *
+  src\agent.ts:1271:     * "verify" used to be checked FIRST, gated only by
+  src\agent.ts:1272:     * `hasPotentiallyCompletedWork` — which is just
+> src\agent.ts:1273:     * `executedTools.length > 0`. That meant once a single tool call
+  src\agent.ts:1274:     * happened (success OR failure), this condition stayed true for
+  src\agent.ts:1275:     * the rest of the task, permanently starving "inspect"/"build"/
+  src\agent.ts:1276:     * "test"/"debug" below of ever being reached again. Phase-specific
+  src\agent.ts:1277:     * readiness is now checked first, matching the documented
+  src\agent.ts:1278:     * lifecycle. No phase was removed; this is a reordering only.
+  src\agent.ts:1279:     * ------------------------------------------------------------
+  src\agent.ts:1280:     */
+  src\agent.ts:1281:
+  src\agent.ts:1282:    if (
+  src\agent.ts:1283:      state.consecutiveFailures >
+  src\agent.ts:1284:      0
+  src\agent.ts:1285:    ) {
+  src\agent.ts:1286:      return "debug";
+  src\agent.ts:1287:    }
+  src\agent.ts:1288:
+  src\agent.ts:1289:    if (
+  src\agent.ts:1290:      state.plan.requiresInspection &&
+  src\agent.ts:1291:      !this.hasInspectionEvidence(
+  src\agent.ts:1292:        state,
+  src\agent.ts:1293:      )
+  src\agent.ts:1294:    ) {
+  src\agent.ts:1295:      return "inspect";
+  src\agent.ts:1296:    }
+  src\agent.ts:1297:
+  src\agent.ts:1298:    if (
+  src\agent.ts:1300:      !this.hasBuildEvidence(state)
+  src\agent.ts:1301:    ) {
+  src\agent.ts:1302:      return "build";
+  src\agent.ts:1303:    }
+  src\agent.ts:1304:
+  src\agent.ts:1305:    if (
+  src\agent.ts:1306:      state.plan.requiresTesting &&
+  src\agent.ts:1307:      !this.hasTestingEvidence(
+  src\agent.ts:1308:        state,
+  src\agent.ts:1309:      )
+  src\agent.ts:1310:    ) {
+  src\agent.ts:1311:      return "test";
+  src\agent.ts:1312:    }
+  src\agent.ts:1313:
+  src\agent.ts:1314:    if (
+> src\agent.ts:1315:      state.plan.requiresVerification &&
+  src\agent.ts:1316:      this.hasPotentiallyCompletedWork(
+  src\agent.ts:1317:        state,
+  src\agent.ts:1318:      )
+  src\agent.ts:1319:    ) {
+  src\agent.ts:1320:      return "verify";
+  src\agent.ts:1321:    }
+  src\agent.ts:1322:
+> src\agent.ts:1323:    return "execute";
+  src\agent.ts:1324:  }
+  src\agent.ts:1325:
+  src\agent.ts:1326:  /* ==========================================================================
+  src\agent.ts:1327:   * MODEL
+  src\agent.ts:1328:   * ======================================================================== */
+  src\agent.ts:1329:
+  src\agent.ts:1330:  private async callModel(
+  src\agent.ts:1331:    provider: AIProvider,
+  src\agent.ts:1332:    model: string,
+  src\agent.ts:1333:    messages: AIMessage[],
+  src\agent.ts:1334:    tools: AIToolDefinition[],
+  src\agent.ts:1335:    phase: AgentPhase,
+  src\agent.ts:1336:  ): Promise<ChatResponse> {
+  src\agent.ts:1337:    const phaseInstruction =
+  src\agent.ts:1338:      this.buildPhaseInstruction(
+  src\agent.ts:1339:        phase,
+  src\agent.ts:1340:      );
+  src\agent.ts:1341:
+  src\agent.ts:1342:    const modelMessages =
+  src\agent.ts:1343:      this.injectPhaseInstruction(
+  src\agent.ts:1344:        messages,
+  src\agent.ts:1345:        phaseInstruction,
+  src\agent.ts:1346:      );
+  src\agent.ts:1347:
+  src\agent.ts:1348:    return provider.chat({
+  src\agent.ts:1455:Make the smallest safe correction.
+  src\agent.ts:1456:Then test or inspect again.
+  src\agent.ts:1457:
+  src\agent.ts:1458:Do not simply repeat the exact failed operation.
+  src\agent.ts:1459:`;
+  src\agent.ts:1460:
+  src\agent.ts:1461:      case "verify":
+  src\agent.ts:1462:        return `
+  src\agent.ts:1463:CURRENT AGENT PHASE: VERIFY
+  src\agent.ts:1464:
+  src\agent.ts:1465:You must establish concrete evidence that the requested outcome exists.
+  src\agent.ts:1466:
+  src\agent.ts:1467:Do not treat your own previous response as evidence.
+  src\agent.ts:1468:Use inspection/runtime tools.
+  src\agent.ts:1469:
+> src\agent.ts:1470:A sentence such as "it should work" is not verification.
+  src\agent.ts:1471:Only actual tool results count as evidence.
+  src\agent.ts:1472:`;
+  src\agent.ts:1473:      case "plan":
+  src\agent.ts:1474:        return `
+  src\agent.ts:1475:CURRENT AGENT PHASE: PLAN
+  src\agent.ts:1476:
+  src\agent.ts:1477:Break the user's objective into concrete executable steps.
+  src\agent.ts:1478:
+  src\agent.ts:1479:Prefer existing project structures.
+  src\agent.ts:1480:Avoid unnecessary changes.
+  src\agent.ts:1481:The plan must lead to actual tool execution when tools are required.
+  src\agent.ts:1482:`;
+  src\agent.ts:1483:
+  src\agent.ts:1484:      case "understand":
+  src\agent.ts:1485:        return `
+  src\agent.ts:1486:CURRENT AGENT PHASE: UNDERSTAND
+  src\agent.ts:1487:
+  src\agent.ts:1488:Understand the user's exact objective, constraints, and expected final state.
+  src\agent.ts:1489:
+  src\agent.ts:1490:If the task is actionable, proceed toward execution rather than giving a 
+tutorial.
+  src\agent.ts:1491:`;
+  src\agent.ts:1492:
+  src\agent.ts:1493:      case "complete":
+  src\agent.ts:1494:        return `
+  src\agent.ts:1495:The task has passed its required completion checks.
+  src\agent.ts:1634:
+  src\agent.ts:1635:  private resolveToolGroups(
+  src\agent.ts:1636:    input: {
+  src\agent.ts:1637:      needsRoblox: boolean;
+  src\agent.ts:1638:
+  src\agent.ts:1639:      needsFiles: boolean;
+  src\agent.ts:1640:
+  src\agent.ts:1641:      needsTerminal: boolean;
+  src\agent.ts:1642:
+  src\agent.ts:1643:      requiresInspection: boolean;
+  src\agent.ts:1644:
+  src\agent.ts:1645:      requiresBuild: boolean;
+  src\agent.ts:1646:
+  src\agent.ts:1647:      requiresTesting: boolean;
+  src\agent.ts:1648:
+> src\agent.ts:1649:      requiresVerification: boolean;
+  src\agent.ts:1650:    },
+  src\agent.ts:1651:  ): ToolGroup[] {
+  src\agent.ts:1652:    const groups =
+  src\agent.ts:1653:      new Set<ToolGroup>();
+  src\agent.ts:1654:
+  src\agent.ts:1655:    if (
+  src\agent.ts:1656:      input.needsRoblox
+  src\agent.ts:1657:    ) {
+  src\agent.ts:1658:      if (
+  src\agent.ts:1659:        input.requiresInspection ||
+  src\agent.ts:1660:        input.requiresBuild ||
+  src\agent.ts:1661:        input.requiresTesting ||
+> src\agent.ts:1662:        input.requiresVerification
+  src\agent.ts:1663:      ) {
+  src\agent.ts:1664:        groups.add(
+  src\agent.ts:1665:          "roblox-inspection",
+  src\agent.ts:1666:        );
+  src\agent.ts:1667:      }
+  src\agent.ts:1668:
+  src\agent.ts:1669:      if (
+  src\agent.ts:1670:        input.requiresBuild
+  src\agent.ts:1671:      ) {
+  src\agent.ts:1672:        groups.add(
+  src\agent.ts:1673:          "roblox-building",
+  src\agent.ts:1674:        );
+  src\agent.ts:1675:      }
+  src\agent.ts:1676:
+  src\agent.ts:1677:      if (
+  src\agent.ts:1678:        input.requiresTesting ||
+> src\agent.ts:1679:        input.requiresVerification
+  src\agent.ts:1680:      ) {
+  src\agent.ts:1681:        groups.add(
+  src\agent.ts:1682:          "roblox-execution",
+  src\agent.ts:1683:        );
+  src\agent.ts:1684:      }
+  src\agent.ts:1685:    }
+  src\agent.ts:1686:
+  src\agent.ts:1687:    if (
+  src\agent.ts:1688:      input.needsFiles
+  src\agent.ts:1689:    ) {
+  src\agent.ts:1690:      groups.add(
+  src\agent.ts:1691:        "filesystem",
+  src\agent.ts:1692:      );
+  src\agent.ts:1693:    }
+  src\agent.ts:1694:
+  src\agent.ts:1695:    if (
+  src\agent.ts:1696:      input.needsTerminal
+  src\agent.ts:1697:    ) {
+  src\agent.ts:1698:      groups.add(
+  src\agent.ts:1699:        "terminal",
+  src\agent.ts:1700:      );
+  src\agent.ts:1701:    }
+  src\agent.ts:1702:
+  src\agent.ts:1703:    if (
+  src\agent.ts:1704:      groups.size === 0
+  src\agent.ts:1705:    ) {
+  src\agent.ts:1706:      groups.add("general");
+  src\agent.ts:1707:    }
+  src\agent.ts:1708:
+  src\agent.ts:1709:    return [...groups];
+  src\agent.ts:1710:  }
+  src\agent.ts:1711:
+  src\agent.ts:1712:  /* ==========================================================================
+  src\agent.ts:1713:   * TOOL EXECUTION
+  src\agent.ts:1714:   * ======================================================================== */
+  src\agent.ts:1715:
+> src\agent.ts:1716:  private async executeToolCalls(
+  src\agent.ts:1717:    state: AgentState,
+  src\agent.ts:1718:    toolCalls: AIToolCall[],
+  src\agent.ts:1719:  ): Promise<void> {
+  src\agent.ts:1720:    for (
+  src\agent.ts:1721:      const toolCall of toolCalls
+  src\agent.ts:1722:    ) {
+  src\agent.ts:1723:      if (
+  src\agent.ts:1724:        state.totalToolCalls >=
+  src\agent.ts:1725:        MAX_TOTAL_TOOL_CALLS
+  src\agent.ts:1726:      ) {
+  src\agent.ts:1727:        break;
+  src\agent.ts:1728:      }
+  src\agent.ts:1729:
+  src\agent.ts:1730:      const name =
+  src\agent.ts:1731:        toolCall.function.name;
+  src\agent.ts:1732:
+  src\agent.ts:1733:      const input =
+  src\agent.ts:1734:        (toolCall.function.arguments ??
+  src\agent.ts:1735:          {}) as Record<
+  src\agent.ts:1736:          string,
+  src\agent.ts:1737:          unknown
+  src\agent.ts:1738:        >;
+  src\agent.ts:1739:
+  src\agent.ts:1740:      state.totalToolCalls++;
+  src\agent.ts:1741:
+  src\agent.ts:1910:              error,
+  src\agent.ts:1911:
+  src\agent.ts:1912:              blocked:
+  src\agent.ts:1913:                "destructive-operation-policy",
+  src\agent.ts:1914:            }),
+  src\agent.ts:1915:
+  src\agent.ts:1916:          toolCallId:
+  src\agent.ts:1917:            toolCall.id,
+  src\agent.ts:1918:        });
+  src\agent.ts:1919:
+  src\agent.ts:1920:        continue;
+  src\agent.ts:1921:      }
+  src\agent.ts:1922:
+  src\agent.ts:1923:      /*
+  src\agent.ts:1924:       * ------------------------------------------------------------
+> src\agent.ts:1925:       * NORMALIZE + EXECUTE, WITH ONE STALE-SESSION RETRY
+  src\agent.ts:1926:       * ------------------------------------------------------------
+  src\agent.ts:1927:       */
+  src\agent.ts:1928:
+  src\agent.ts:1929:      const discoveryToolName =
+  src\agent.ts:1930:        this.findStudioDiscoveryToolName();
+  src\agent.ts:1931:
+  src\agent.ts:1932:      const firstAttempt =
+  src\agent.ts:1933:        this.normalizeToolArguments(
+  src\agent.ts:1934:          name,
+  src\agent.ts:1935:          input,
+  src\agent.ts:1936:          state,
+  src\agent.ts:1937:        );
+  src\agent.ts:1938:
+> src\agent.ts:1939:      let executedInput: Record<
+  src\agent.ts:1940:        string,
+  src\agent.ts:1941:        unknown
+  src\agent.ts:1942:      > = firstAttempt.normalized;
+  src\agent.ts:1943:
+  src\agent.ts:1944:      let studioIdInjected =
+  src\agent.ts:1945:        firstAttempt.studioIdInjected;
+  src\agent.ts:1946:
+  src\agent.ts:1947:      this.printNormalizedArguments(
+  src\agent.ts:1948:        name,
+  src\agent.ts:1949:        input,
+> src\agent.ts:1950:        executedInput,
+  src\agent.ts:1951:        studioIdInjected,
+  src\agent.ts:1952:      );
+  src\agent.ts:1953:
+  src\agent.ts:1954:      let result =
+> src\agent.ts:1955:        await this.tools.execute(
+  src\agent.ts:1956:          name,
+> src\agent.ts:1957:          executedInput,
+  src\agent.ts:1958:          {
+  src\agent.ts:1959:            sessionId:
+  src\agent.ts:1960:              this.sessionId,
+  src\agent.ts:1961:          },
+  src\agent.ts:1962:        );
+  src\agent.ts:1963:
+  src\agent.ts:1964:      let staleRecoveryAttempted = false;
+  src\agent.ts:1965:      let staleRecoverySucceeded =
+  src\agent.ts:1966:        false;
+  src\agent.ts:1967:
+  src\agent.ts:1968:      const isRobloxTool =
+  src\agent.ts:1969:        (
+  src\agent.ts:1970:          this.tools.getGroup(
+  src\agent.ts:1971:            name,
+  src\agent.ts:1972:          ) ?? ""
+  src\agent.ts:1973:        ).startsWith("roblox");
+  src\agent.ts:1974:
+  src\agent.ts:1975:      if (
+  src\agent.ts:1976:        !result.success &&
+  src\agent.ts:1977:        isRobloxTool &&
+  src\agent.ts:1978:        name !== discoveryToolName &&
+  src\agent.ts:1979:        looksLikeStaleStudioError(
+  src\agent.ts:1980:          result.error,
+  src\agent.ts:1981:        )
+  src\agent.ts:1982:      ) {
+  src\agent.ts:1983:        staleRecoveryAttempted = true;
+  src\agent.ts:1984:
+  src\agent.ts:1985:        this.printStaleStudioRecoveryAttempt(
+  src\agent.ts:1986:          name,
+  src\agent.ts:1987:          result.error,
+  src\agent.ts:1988:        );
+  src\agent.ts:1989:
+> src\agent.ts:1990:        state.studioContext = {
+  src\agent.ts:1991:          status: "unresolved",
+  src\agent.ts:1992:        };
+  src\agent.ts:1993:
+> src\agent.ts:1994:        await this.ensureRobloxStudioContext(
+  src\agent.ts:1995:          state,
+  src\agent.ts:1996:        );
+  src\agent.ts:1997:
+  src\agent.ts:1998:        if (
+> src\agent.ts:1999:          state.studioContext
+  src\agent.ts:2000:            .status ===
+  src\agent.ts:2001:            "resolved" &&
+> src\agent.ts:2002:          state.studioContext.studioId
+  src\agent.ts:2003:        ) {
+  src\agent.ts:2004:          const retryAttempt =
+  src\agent.ts:2005:            this.normalizeToolArguments(
+  src\agent.ts:2006:              name,
+  src\agent.ts:2007:              input,
+  src\agent.ts:2008:              state,
+  src\agent.ts:2009:            );
+  src\agent.ts:2010:
+> src\agent.ts:2011:          executedInput =
+  src\agent.ts:2012:            retryAttempt.normalized;
+  src\agent.ts:2013:
+  src\agent.ts:2014:          studioIdInjected =
+  src\agent.ts:2015:            retryAttempt.studioIdInjected;
+  src\agent.ts:2016:
+  src\agent.ts:2017:          result =
+> src\agent.ts:2018:            await this.tools.execute(
+  src\agent.ts:2019:              name,
+> src\agent.ts:2020:              executedInput,
+  src\agent.ts:2021:              {
+  src\agent.ts:2022:                sessionId:
+  src\agent.ts:2023:                  this.sessionId,
+  src\agent.ts:2024:              },
+  src\agent.ts:2025:            );
+  src\agent.ts:2026:
+  src\agent.ts:2027:          staleRecoverySucceeded =
+  src\agent.ts:2028:            result.success;
+  src\agent.ts:2029:        }
+  src\agent.ts:2030:
+  src\agent.ts:2031:        this.printStaleStudioRecoveryResult(
+  src\agent.ts:2032:          staleRecoverySucceeded,
+  src\agent.ts:2033:        );
+  src\agent.ts:2034:      }
+  src\agent.ts:2035:
+  src\agent.ts:2036:      const finishedAt =
+  src\agent.ts:2037:        new Date().toISOString();
+  src\agent.ts:2038:
+  src\agent.ts:2039:      const execution: ToolExecution =
+  src\agent.ts:2040:        {
+  src\agent.ts:2041:          id: executionId,
+  src\agent.ts:2042:
+  src\agent.ts:2043:          /*
+  src\agent.ts:2044:           * Stored as the model's original request for readability in
+> src\agent.ts:2045:           * execution history / evidence text; the actually-executed,
+  src\agent.ts:2046:           * normalized arguments are logged separately (see
+  src\agent.ts:2047:           * printNormalizedArguments) and used for the real call.
+  src\agent.ts:2048:           */
+  src\agent.ts:2049:          name,
+  src\agent.ts:2050:
+  src\agent.ts:2051:          input,
+  src\agent.ts:2052:
+  src\agent.ts:2053:          success:
+  src\agent.ts:2054:            result.success,
+  src\agent.ts:2055:
+  src\agent.ts:2056:          data:
+  src\agent.ts:2057:            result.data,
+  src\agent.ts:2058:
+  src\agent.ts:2059:          error:
+  src\agent.ts:2060:            result.error,
+  src\agent.ts:2061:
+  src\agent.ts:2062:          iteration:
+  src\agent.ts:2063:            state.iterations,
+  src\agent.ts:2064:
+  src\agent.ts:2065:          phase:
+  src\agent.ts:2066:            state.phase,
+  src\agent.ts:2067:
+  src\agent.ts:2068:          startedAt,
+  src\agent.ts:2069:
+  src\agent.ts:2070:          finishedAt,
+  src\agent.ts:2071:        };
+  src\agent.ts:2072:
+> src\agent.ts:2073:      state.executedTools.push(
+  src\agent.ts:2074:        execution,
+  src\agent.ts:2075:      );
+  src\agent.ts:2076:
+  src\agent.ts:2077:      if (
+  src\agent.ts:2078:        result.success
+  src\agent.ts:2079:      ) {
+  src\agent.ts:2080:        state.consecutiveFailures = 0;
+  src\agent.ts:2081:      } else {
+  src\agent.ts:2082:        state.consecutiveFailures++;
+  src\agent.ts:2083:
+  src\agent.ts:2084:        state.failedCallSignatures.add(
+  src\agent.ts:2085:          signature,
+  src\agent.ts:2086:        );
+  src\agent.ts:2087:      }
+  src\agent.ts:2088:
+  src\agent.ts:2089:      const serialized =
+  src\agent.ts:2090:        this.serializeToolResult(
+  src\agent.ts:2091:          result,
+  src\agent.ts:2092:        );
+  src\agent.ts:2093:
+  src\agent.ts:2094:      state.messages.push({
+  src\agent.ts:2095:        role: "tool",
+  src\agent.ts:2096:
+  src\agent.ts:2097:        content:
+  src\agent.ts:2098:          serialized,
+  src\agent.ts:2136:
+  src\agent.ts:2137:  private recordToolFailure(
+  src\agent.ts:2138:    state: AgentState,
+  src\agent.ts:2139:    executionId: string,
+  src\agent.ts:2140:    name: string,
+  src\agent.ts:2141:    input: unknown,
+  src\agent.ts:2142:    error: string,
+  src\agent.ts:2143:    startedAt: string,
+  src\agent.ts:2144:  ): void {
+  src\agent.ts:2145:    state.failedCallSignatures.add(
+  src\agent.ts:2146:      `${name}:${this.stableStringify(
+  src\agent.ts:2147:        input,
+  src\agent.ts:2148:      )}`,
+  src\agent.ts:2149:    );
+  src\agent.ts:2150:
+> src\agent.ts:2151:    state.executedTools.push({
+  src\agent.ts:2152:      id: executionId,
+  src\agent.ts:2153:
+  src\agent.ts:2154:      name,
+  src\agent.ts:2155:
+  src\agent.ts:2156:      input,
+  src\agent.ts:2157:
+  src\agent.ts:2158:      success: false,
+  src\agent.ts:2159:
+  src\agent.ts:2160:      error,
+  src\agent.ts:2161:
+  src\agent.ts:2162:      iteration:
+  src\agent.ts:2163:        state.iterations,
+  src\agent.ts:2164:
+  src\agent.ts:2165:      phase:
+  src\agent.ts:2166:        state.phase,
+  src\agent.ts:2167:
+  src\agent.ts:2168:      startedAt,
+  src\agent.ts:2169:
+  src\agent.ts:2170:      finishedAt:
+  src\agent.ts:2171:        new Date().toISOString(),
+  src\agent.ts:2172:    });
+  src\agent.ts:2173:
+  src\agent.ts:2174:    state.consecutiveFailures++;
+  src\agent.ts:2175:
+  src\agent.ts:2176:    state.errors.push({
+  src\agent.ts:2187:
+  src\agent.ts:2188:      timestamp:
+  src\agent.ts:2189:        new Date().toISOString(),
+  src\agent.ts:2190:    });
+  src\agent.ts:2191:
+  src\agent.ts:2192:    this.printToolResult(
+  src\agent.ts:2193:      name,
+  src\agent.ts:2194:      {
+  src\agent.ts:2195:        success: false,
+  src\agent.ts:2196:        error,
+  src\agent.ts:2197:      },
+  src\agent.ts:2198:    );
+  src\agent.ts:2199:  }
+  src\agent.ts:2200:
+  src\agent.ts:2201:  /* ==========================================================================
+> src\agent.ts:2202:   * VERIFICATION ENGINE
+  src\agent.ts:2203:   * ======================================================================== */
+  src\agent.ts:2204:
+  src\agent.ts:2205:  private async verifyTask(
+  src\agent.ts:2206:    state: AgentState,
+  src\agent.ts:2207:    provider: AIProvider,
+  src\agent.ts:2208:    model: string,
+> src\agent.ts:2209:  ): Promise<VerificationState> {
+> src\agent.ts:2210:    state.verification.attempted =
+  src\agent.ts:2211:      true;
+  src\agent.ts:2212:
+> src\agent.ts:2213:    const verificationTools =
+  src\agent.ts:2214:      this.tools.getAIDefinitions(
+  src\agent.ts:2215:        [
+  src\agent.ts:2216:          "roblox-inspection",
+  src\agent.ts:2217:          "roblox-execution",
+  src\agent.ts:2218:        ],
+  src\agent.ts:2219:        {
+  src\agent.ts:2220:          includeDescriptions: true,
+  src\agent.ts:2221:
+  src\agent.ts:2222:          sort: true,
+  src\agent.ts:2223:
+  src\agent.ts:2224:          maxTools: 40,
+  src\agent.ts:2225:        },
+  src\agent.ts:2226:      );
+  src\agent.ts:2227:
+  src\agent.ts:2228:    if (
+> src\agent.ts:2229:      verificationTools.length === 0
+  src\agent.ts:2230:    ) {
+  src\agent.ts:2231:      return {
+  src\agent.ts:2232:        required: true,
+  src\agent.ts:2233:
+  src\agent.ts:2234:        attempted: true,
+  src\agent.ts:2235:
+  src\agent.ts:2236:        passed: false,
+  src\agent.ts:2237:
+  src\agent.ts:2238:        checks: [],
+  src\agent.ts:2239:
+  src\agent.ts:2240:        evidence: [],
+  src\agent.ts:2241:
+  src\agent.ts:2242:        reason:
+> src\agent.ts:2243:          "No Roblox verification tools are available.",
+  src\agent.ts:2244:      };
+  src\agent.ts:2245:    }
+  src\agent.ts:2246:
+> src\agent.ts:2247:    const verificationMessages:
+  src\agent.ts:2248:      AIMessage[] = [
+  src\agent.ts:2249:        {
+  src\agent.ts:2250:          role: "system",
+  src\agent.ts:2251:
+  src\agent.ts:2252:          content: `
+> src\agent.ts:2253:You are the verification engine for an autonomous Roblox development agent.
+  src\agent.ts:2254:
+  src\agent.ts:2255:You are NOT a normal chatbot.
+  src\agent.ts:2256:
+  src\agent.ts:2257:Your job is to actually accomplish the user's objective using the tools 
+available to you.
+  src\agent.ts:2258:
+  src\agent.ts:2259:==================================================
+  src\agent.ts:2260:CORE RULES
+  src\agent.ts:2261:==================================================
+  src\agent.ts:2262:
+  src\agent.ts:2263:1. ACT, DON'T JUST EXPLAIN.
+  src\agent.ts:2264:   If a tool can perform the requested operation, use it.
+  src\agent.ts:2265:
+  src\agent.ts:2266:2. NEVER FAKE TOOL CALLS.
+  src\agent.ts:2267:   JSON written inside assistant content is not a tool call.
+  src\agent.ts:2268:
+  src\agent.ts:2269:3. NEVER CLAIM SUCCESS WITHOUT EVIDENCE.
+  src\agent.ts:2270:   Creating a file is not proof that Roblox changed.
+  src\agent.ts:2271:   A successful create operation is not automatically proof of final 
+functionality.
+  src\agent.ts:2272:   A model's own statement is never sufficient evidence.
+  src\agent.ts:2273:
+  src\agent.ts:2274:4. INSPECT BEFORE SIGNIFICANT CHANGES.
+  src\agent.ts:2275:   Understand existing project structure before modifying it.
+  src\agent.ts:2276:
+  src\agent.ts:2277:5. AVOID DUPLICATES.
+  src\agent.ts:2278:   Reuse appropriate existing objects/systems when possible.
+  src\agent.ts:2291:10. MAKE THE SMALLEST SAFE CHANGE.
+  src\agent.ts:2292:    Do not restructure unrelated parts of the project.
+  src\agent.ts:2293:
+  src\agent.ts:2294:==================================================
+  src\agent.ts:2295:ROBLOX RULES
+  src\agent.ts:2296:==================================================
+  src\agent.ts:2297:
+  src\agent.ts:2298:For Roblox tasks:
+  src\agent.ts:2299:
+  src\agent.ts:2300:- Roblox Studio is the target environment.
+  src\agent.ts:2301:- Use inspection tools to understand the current state.
+  src\agent.ts:2302:- Use building tools to make actual Studio changes.
+  src\agent.ts:2303:- Use execution/playtest tools to validate behavior.
+  src\agent.ts:2304:- Use output/error tools to diagnose runtime failures.
+  src\agent.ts:2305:- Never assume an object exists.
+> src\agent.ts:2306:- Never assume a script executed correctly.
+  src\agent.ts:2307:- Never confuse source code on disk with live Roblox state.
+  src\agent.ts:2308:- studio_id is handled automatically by the runtime — you do not need
+  src\agent.ts:2309:  to discover, remember, or pass it yourself.
+  src\agent.ts:2310:
+  src\agent.ts:2311:==================================================
+  src\agent.ts:2312:DESTRUCTIVE OPERATIONS
+  src\agent.ts:2313:==================================================
+  src\agent.ts:2314:
+  src\agent.ts:2315:Destructive operations include deleting, destroying, wiping, clearing, 
+resetting, replacing, or shutting down project content.
+  src\agent.ts:2316:
+  src\agent.ts:2317:Only perform destructive operations when the user's request clearly authorizes 
+them.
+  src\agent.ts:2318:
+  src\agent.ts:2319:Do not interpret a general request such as "build X" as permission to delete 
+unrelated content.
+  src\agent.ts:2320:
+  src\agent.ts:2321:==================================================
+  src\agent.ts:2322:CURRENT TASK
+  src\agent.ts:2323:==================================================
+  src\agent.ts:2324:
+  src\agent.ts:2325:Intent:
+  src\agent.ts:2326:${state.plan.intent}
+  src\agent.ts:2327:
+  src\agent.ts:2328:Capability:
+  src\agent.ts:2329:${state.plan.capability}
+  src\agent.ts:2330:
+  src\agent.ts:2331:Objective:
+  src\agent.ts:2332:${state.plan.objective}
+  src\agent.ts:2333:
+  src\agent.ts:2334:Needs Roblox:
+  src\agent.ts:2335:${state.plan.needsRoblox}
+  src\agent.ts:2336:
+  src\agent.ts:2337:Needs Build:
+  src\agent.ts:2338:${state.plan.requiresBuild}
+  src\agent.ts:2339:
+  src\agent.ts:2340:Needs Testing:
+  src\agent.ts:2341:${state.plan.requiresTesting}
+  src\agent.ts:2342:
+> src\agent.ts:2343:Needs Verification:
+> src\agent.ts:2344:${state.plan.requiresVerification}
+  src\agent.ts:2345:
+  src\agent.ts:2346:Needs Files:
+  src\agent.ts:2347:${state.plan.needsFiles}
+  src\agent.ts:2348:
+  src\agent.ts:2349:Needs Terminal:
+  src\agent.ts:2350:${state.plan.needsTerminal}
+  src\agent.ts:2351:
+  src\agent.ts:2352:Explicit Read-Only (do not modify/build/create anything):
+  src\agent.ts:2353:${state.plan.explicitReadOnly}
+  src\agent.ts:2354:${
+  src\agent.ts:2355:  state.plan.protectedTargets.length >
+  src\agent.ts:2356:  0
+  src\agent.ts:2357:    ? `\nProtected (do not modify, everything else is 
+allowed):\n${state.plan.protectedTargets
+  src\agent.ts:2358:        .map(
+  src\agent.ts:2359:          (target) => `- ${target}`,
+  src\agent.ts:2360:        )
+  src\agent.ts:2361:        .join("\n")}\n`
+  src\agent.ts:2362:    : ""
+  src\agent.ts:2363:}
+  src\agent.ts:2364:Roblox Studio Context:
+> src\agent.ts:2365:${this.describeStudioContext(
+  src\agent.ts:2366:  state,
+  src\agent.ts:2367:)}
+  src\agent.ts:2368:
+  src\agent.ts:2369:==================================================
+  src\agent.ts:2370:SUCCESS CRITERIA
+  src\agent.ts:2371:==================================================
+  src\agent.ts:2372:
+  src\agent.ts:2373:${state.plan.successCriteria
+  src\agent.ts:2374:  .map(
+  src\agent.ts:2375:    (criterion) =>
+  src\agent.ts:2376:      `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: 
+${criterion.description}`,
+  src\agent.ts:2377:  )
+  src\agent.ts:2378:  .join("\n")}
+  src\agent.ts:2379:
+  src\agent.ts:2380:==================================================
+  src\agent.ts:2381:ALREADY ESTABLISHED IN THIS SESSION
+  src\agent.ts:2382:==================================================
+  src\agent.ts:2383:
+  src\agent.ts:2384:The main agent already ran the following tool calls before reaching
+> src\agent.ts:2385:verification. Their results are real evidence — reuse concrete values
+  src\agent.ts:2386:(such as IDs) from them instead of re-deriving or re-guessing. Only
+  src\agent.ts:2387:call a tool again if the current state may genuinely have changed
+  src\agent.ts:2388:since it ran.
+  src\agent.ts:2389:
+  src\agent.ts:2390:${
+> src\agent.ts:2391:  state.executedTools.filter(
+  src\agent.ts:2392:    (execution) => execution.success,
+  src\agent.ts:2393:  ).length > 0
+> src\agent.ts:2394:    ? state.executedTools
+  src\agent.ts:2395:        .filter(
+  src\agent.ts:2396:          (execution) =>
+  src\agent.ts:2397:            execution.success,
+  src\agent.ts:2398:        )
+  src\agent.ts:2399:        .map(
+  src\agent.ts:2400:          (execution) =>
+  src\agent.ts:2401:            `- ${execution.name} → ${this.summarizeEvidence(
+  src\agent.ts:2402:              execution.data,
+  src\agent.ts:2403:            )}`,
+  src\agent.ts:2404:        )
+  src\agent.ts:2405:        .join("\n")
+  src\agent.ts:2406:    : "(no successful tool calls yet)"
+  src\agent.ts:2407:}
+  src\agent.ts:2408:
+  src\agent.ts:2409:==================================================
+  src\agent.ts:2410:EXECUTION STRATEGY
+  src\agent.ts:2411:==================================================
+  src\agent.ts:2412:
+  src\agent.ts:2413:Follow this lifecycle when appropriate:
+  src\agent.ts:2414:
+  src\agent.ts:2415:UNDERSTAND
+  src\agent.ts:2416:→ INSPECT
+  src\agent.ts:2417:→ PLAN
+  src\agent.ts:2418:→ BUILD
+> src\agent.ts:2419:→ EXECUTE
+  src\agent.ts:2420:→ TEST
+  src\agent.ts:2421:→ DEBUG
+  src\agent.ts:2422:→ VERIFY
+  src\agent.ts:2423:→ COMPLETE
+  src\agent.ts:2424:
+> src\agent.ts:2425:Do not skip verification merely because the last tool returned success.
+  src\agent.ts:2426:
+  src\agent.ts:2427:Do not provide a tutorial unless the user explicitly asks for instructions.
+  src\agent.ts:2428:
+  src\agent.ts:2429:If the requested task is possible with available tools, perform it.
+  src\agent.ts:2430:`,
+  src\agent.ts:2431:        },
+  src\agent.ts:2432:
+  src\agent.ts:2433:        {
+  src\agent.ts:2434:          role: "user",
+  src\agent.ts:2435:
+  src\agent.ts:2436:          content:
+  src\agent.ts:2437:            "Verify the task now, using the already-established results above 
+wherever they are still sufficient.",
+  src\agent.ts:2438:        },
+  src\agent.ts:2439:      ];
+  src\agent.ts:2440:
+  src\agent.ts:2441:    const firstResponse =
+  src\agent.ts:2442:      await provider.chat({
+  src\agent.ts:2443:        model,
+  src\agent.ts:2444:
+  src\agent.ts:2445:        messages:
+> src\agent.ts:2446:          verificationMessages,
+  src\agent.ts:2447:
+  src\agent.ts:2448:        temperature: 0,
+  src\agent.ts:2449:
+  src\agent.ts:2450:        stream: false,
+  src\agent.ts:2451:
+  src\agent.ts:2452:        tools:
+> src\agent.ts:2453:          verificationTools,
+  src\agent.ts:2454:      });
+  src\agent.ts:2455:
+  src\agent.ts:2456:    const firstMessage =
+  src\agent.ts:2457:      firstResponse.message;
+  src\agent.ts:2458:
+  src\agent.ts:2459:    const calls =
+  src\agent.ts:2460:      firstMessage.toolCalls ??
+  src\agent.ts:2461:      [];
+  src\agent.ts:2462:
+  src\agent.ts:2463:    const evidence:
+  src\agent.ts:2464:      string[] = [];
+  src\agent.ts:2465:
+  src\agent.ts:2466:    const sourceTools:
+  src\agent.ts:2467:      string[] = [];
+  src\agent.ts:2468:
+  src\agent.ts:2469:    for (
+  src\agent.ts:2470:      const toolCall of calls
+  src\agent.ts:2471:    ) {
+  src\agent.ts:2472:      const toolName =
+  src\agent.ts:2473:        toolCall.function.name;
+  src\agent.ts:2474:
+  src\agent.ts:2475:      if (
+> src\agent.ts:2476:        !verificationTools.some(
+  src\agent.ts:2477:          (definition) =>
+  src\agent.ts:2478:            definition.function.name ===
+  src\agent.ts:2479:            toolName,
+  src\agent.ts:2480:        )
+  src\agent.ts:2481:      ) {
+  src\agent.ts:2482:        continue;
+  src\agent.ts:2483:      }
+  src\agent.ts:2484:
+  src\agent.ts:2485:      const rawArgs =
+  src\agent.ts:2486:        (toolCall.function
+  src\agent.ts:2487:          .arguments ??
+  src\agent.ts:2488:          {}) as Record<
+  src\agent.ts:2489:          string,
+  src\agent.ts:2490:          unknown
+  src\agent.ts:2491:        >;
+  src\agent.ts:2492:
+  src\agent.ts:2493:      const normalizedArgs =
+  src\agent.ts:2494:        this.normalizeToolArguments(
+  src\agent.ts:2495:          toolName,
+  src\agent.ts:2496:          rawArgs,
+  src\agent.ts:2497:          state,
+  src\agent.ts:2498:        ).normalized;
+  src\agent.ts:2499:
+  src\agent.ts:2500:      const result =
+> src\agent.ts:2501:        await this.tools.execute(
+  src\agent.ts:2502:          toolName,
+  src\agent.ts:2503:          normalizedArgs,
+  src\agent.ts:2504:          {
+  src\agent.ts:2505:            sessionId:
+  src\agent.ts:2506:              this.sessionId,
+  src\agent.ts:2507:          },
+  src\agent.ts:2508:        );
+  src\agent.ts:2509:
+  src\agent.ts:2510:      sourceTools.push(
+  src\agent.ts:2511:        toolName,
+  src\agent.ts:2512:      );
+  src\agent.ts:2513:
+  src\agent.ts:2514:      if (
+  src\agent.ts:2515:        result.success
+  src\agent.ts:2516:      ) {
+  src\agent.ts:2517:        evidence.push(
+  src\agent.ts:2518:          `${toolName}: ${this.summarizeEvidence(result.data)}`,
+  src\agent.ts:2519:        );
+  src\agent.ts:2520:      } else {
+  src\agent.ts:2521:        evidence.push(
+  src\agent.ts:2522:          `${toolName}: FAILED - ${this.truncate(
+  src\agent.ts:2523:            result.error ??
+  src\agent.ts:2524:              "Unknown error",
+  src\agent.ts:2525:            2000,
+  src\agent.ts:2526:          )}`,
+  src\agent.ts:2527:        );
+  src\agent.ts:2528:      }
+  src\agent.ts:2529:
+> src\agent.ts:2530:      verificationMessages.push({
+  src\agent.ts:2531:        role: "assistant",
+  src\agent.ts:2532:
+  src\agent.ts:2533:        content:
+  src\agent.ts:2534:          firstMessage.content ??
+  src\agent.ts:2535:          "",
+  src\agent.ts:2536:
+  src\agent.ts:2537:        toolCalls: [
+  src\agent.ts:2538:          toolCall,
+  src\agent.ts:2539:        ],
+  src\agent.ts:2540:      });
+  src\agent.ts:2541:
+> src\agent.ts:2542:      verificationMessages.push({
+  src\agent.ts:2543:        role: "tool",
+  src\agent.ts:2544:
+  src\agent.ts:2545:        content:
+  src\agent.ts:2546:          this.serializeToolResult(
+  src\agent.ts:2547:            result,
+  src\agent.ts:2548:          ),
+  src\agent.ts:2549:
+  src\agent.ts:2550:        toolCallId:
+  src\agent.ts:2551:          toolCall.id,
+  src\agent.ts:2552:      });
+  src\agent.ts:2553:    }
+  src\agent.ts:2554:
+  src\agent.ts:2555:    let finalResponse =
+  src\agent.ts:2556:      firstResponse;
+  src\agent.ts:2557:
+  src\agent.ts:2558:    if (
+  src\agent.ts:2559:      calls.length > 0
+  src\agent.ts:2560:    ) {
+  src\agent.ts:2561:      finalResponse =
+  src\agent.ts:2562:        await provider.chat({
+  src\agent.ts:2563:          model,
+  src\agent.ts:2564:
+  src\agent.ts:2565:          messages:
+> src\agent.ts:2566:            verificationMessages,
+  src\agent.ts:2567:
+  src\agent.ts:2568:          temperature: 0,
+  src\agent.ts:2569:
+  src\agent.ts:2570:          stream: false,
+  src\agent.ts:2571:
+  src\agent.ts:2572:          tools:
+> src\agent.ts:2573:            verificationTools,
+  src\agent.ts:2574:        });
+  src\agent.ts:2575:    }
+  src\agent.ts:2576:
+  src\agent.ts:2577:    const finalContent =
+  src\agent.ts:2578:      finalResponse.message.content
+  src\agent.ts:2579:        ?.trim() ?? "";
+  src\agent.ts:2580:
+  src\agent.ts:2581:    const checks =
+> src\agent.ts:2582:      this.extractVerificationChecks(
+  src\agent.ts:2583:        state,
+  src\agent.ts:2584:        finalContent,
+  src\agent.ts:2585:        evidence,
+  src\agent.ts:2586:        sourceTools,
+  src\agent.ts:2587:      );
+  src\agent.ts:2588:
+  src\agent.ts:2589:    const requiredChecks =
+  src\agent.ts:2590:      checks.filter(
+  src\agent.ts:2591:        (check) =>
+  src\agent.ts:2592:          state.plan.successCriteria.some(
+  src\agent.ts:2593:            (criterion) =>
+  src\agent.ts:2594:              criterion.required &&
+  src\agent.ts:2595:              criterion.id ===
+  src\agent.ts:2596:                check.id,
+  src\agent.ts:2597:          ),
+  src\agent.ts:2598:      );
+  src\agent.ts:2599:
+  src\agent.ts:2600:    const requiredCriteria =
+  src\agent.ts:2601:      state.plan.successCriteria.filter(
+  src\agent.ts:2602:        (criterion) =>
+  src\agent.ts:2603:          criterion.required,
+  src\agent.ts:2604:      );
+  src\agent.ts:2605:
+  src\agent.ts:2606:    const missingCriteria =
+  src\agent.ts:2607:      requiredCriteria.filter(
+  src\agent.ts:2608:        (criterion) =>
+  src\agent.ts:2609:          !checks.some(
+  src\agent.ts:2610:            (check) =>
+  src\agent.ts:2611:              check.id ===
+  src\agent.ts:2612:                criterion.id &&
+  src\agent.ts:2613:              check.passed,
+  src\agent.ts:2614:          ),
+  src\agent.ts:2615:      );
+  src\agent.ts:2616:
+  src\agent.ts:2617:    const passed =
+  src\agent.ts:2618:      requiredCriteria.length > 0
+  src\agent.ts:2619:        ? missingCriteria.length === 0 &&
+  src\agent.ts:2620:          this.hasConcreteEvidence(
+  src\agent.ts:2621:            evidence,
+  src\agent.ts:2622:          )
+> src\agent.ts:2623:        : this.interpretVerificationWithEvidence(
+  src\agent.ts:2624:            finalContent,
+  src\agent.ts:2625:            evidence,
+  src\agent.ts:2626:          );
+  src\agent.ts:2627:
+  src\agent.ts:2628:    const reason =
+  src\agent.ts:2629:      passed
+  src\agent.ts:2630:        ? "All required completion criteria have concrete supporting evidence."
+  src\agent.ts:2631:        : missingCriteria.length > 0
+  src\agent.ts:2632:          ? `Missing or unproven criteria: ${missingCriteria
+  src\agent.ts:2633:              .map(
+  src\agent.ts:2634:                (criterion) =>
+  src\agent.ts:2635:                  criterion.id,
+  src\agent.ts:2636:              )
+  src\agent.ts:2637:              .join(", ")}`
+  src\agent.ts:2638:          : finalContent ||
+> src\agent.ts:2639:            "Verification did not produce sufficient evidence.";
+  src\agent.ts:2640:
+  src\agent.ts:2641:    return {
+  src\agent.ts:2642:      required: true,
+  src\agent.ts:2643:
+  src\agent.ts:2644:      attempted: true,
+  src\agent.ts:2645:
+  src\agent.ts:2646:      passed,
+  src\agent.ts:2647:
+  src\agent.ts:2648:      checks:
+  src\agent.ts:2649:
+  src\agent.ts:2650:        requiredChecks.length > 0
+  src\agent.ts:2651:          ? checks
+  src\agent.ts:2652:          : checks,
+  src\agent.ts:2653:
+  src\agent.ts:2654:      evidence,
+  src\agent.ts:2655:
+  src\agent.ts:2656:      reason,
+  src\agent.ts:2657:    };
+  src\agent.ts:2658:  }
+  src\agent.ts:2659:
+> src\agent.ts:2660:  private extractVerificationChecks(
+  src\agent.ts:2661:    state: AgentState,
+  src\agent.ts:2662:    content: string,
+  src\agent.ts:2663:    evidence: string[],
+  src\agent.ts:2664:    sourceTools: string[],
+> src\agent.ts:2665:  ): VerificationCheck[] {
+  src\agent.ts:2666:    const normalized =
+  src\agent.ts:2667:      content.toLowerCase();
+  src\agent.ts:2668:
+  src\agent.ts:2669:    return state.plan.successCriteria.map(
+  src\agent.ts:2670:      (criterion) => {
+  src\agent.ts:2671:        const relevantEvidence =
+  src\agent.ts:2672:          evidence.filter(
+  src\agent.ts:2673:            (item) =>
+  src\agent.ts:2674:              this.evidenceRelevantToCriterion(
+  src\agent.ts:2675:                item,
+  src\agent.ts:2676:                criterion,
+  src\agent.ts:2677:              ),
+  src\agent.ts:2678:          );
+  src\agent.ts:2679:
+  src\agent.ts:2680:        const textClaimsSuccess =
+  src\agent.ts:2681:          this.textClaimsCriterionPassed(
+  src\agent.ts:2682:            normalized,
+  src\agent.ts:2683:            criterion,
+  src\agent.ts:2684:          );
+  src\agent.ts:2685:
+  src\agent.ts:2686:        const passed =
+  src\agent.ts:2687:          relevantEvidence.length > 0 &&
+  src\agent.ts:2688:          textClaimsSuccess;
+  src\agent.ts:2689:
+  src\agent.ts:2690:        return {
+  src\agent.ts:2796:    );
+  src\agent.ts:2797:  }
+  src\agent.ts:2798:
+  src\agent.ts:2799:  private hasConcreteEvidence(
+  src\agent.ts:2800:    evidence: string[],
+  src\agent.ts:2801:  ): boolean {
+  src\agent.ts:2802:    return evidence.some(
+  src\agent.ts:2803:      (item) =>
+  src\agent.ts:2804:        item.trim().length > 0 &&
+  src\agent.ts:2805:        !item.toLowerCase().includes(
+  src\agent.ts:2806:          "failed",
+  src\agent.ts:2807:        ),
+  src\agent.ts:2808:    );
+  src\agent.ts:2809:  }
+  src\agent.ts:2810:
+> src\agent.ts:2811:  private interpretVerificationWithEvidence(
+  src\agent.ts:2812:    content: string,
+  src\agent.ts:2813:    evidence: string[],
+  src\agent.ts:2814:  ): boolean {
+  src\agent.ts:2815:    if (
+  src\agent.ts:2816:      !this.hasConcreteEvidence(
+  src\agent.ts:2817:        evidence,
+  src\agent.ts:2818:      )
+  src\agent.ts:2819:    ) {
+  src\agent.ts:2820:      return false;
+  src\agent.ts:2821:    }
+  src\agent.ts:2822:
+  src\agent.ts:2823:    const normalized =
+  src\agent.ts:2824:      content.toLowerCase();
+  src\agent.ts:2825:
+  src\agent.ts:2826:    const failurePatterns = [
+  src\agent.ts:2827:      "not complete",
+  src\agent.ts:2828:      "not completed",
+  src\agent.ts:2829:      "does not exist",
+  src\agent.ts:2830:      "doesn't exist",
+  src\agent.ts:2831:      "missing",
+  src\agent.ts:2832:      "not found",
+  src\agent.ts:2833:      "failed",
+  src\agent.ts:2834:      "failure",
+  src\agent.ts:2835:      "unable to verify",
+  src\agent.ts:2836:      "cannot verify",
+  src\agent.ts:2865:      (pattern) =>
+  src\agent.ts:2866:        normalized.includes(
+  src\agent.ts:2867:          pattern,
+  src\agent.ts:2868:        ),
+  src\agent.ts:2869:    );
+  src\agent.ts:2870:  }
+  src\agent.ts:2871:
+  src\agent.ts:2872:  /* ==========================================================================
+  src\agent.ts:2873:   * COMPLETION / RECOVERY
+  src\agent.ts:2874:   * ======================================================================== */
+  src\agent.ts:2875:
+  src\agent.ts:2876:  private requiresEvidenceBeforeCompletion(
+  src\agent.ts:2877:    state: AgentState,
+  src\agent.ts:2878:  ): boolean {
+  src\agent.ts:2879:    return (
+> src\agent.ts:2880:      state.plan.requiresVerification ||
+  src\agent.ts:2881:      state.plan.requiresBuild ||
+  src\agent.ts:2882:      state.plan.requiresTesting
+  src\agent.ts:2883:    );
+  src\agent.ts:2884:  }
+  src\agent.ts:2885:
+  src\agent.ts:2886:  /**
+  src\agent.ts:2887:   * General, plan-driven check for whether the task's own required
+> src\agent.ts:2888:   * categories (inspection/build/testing/verification) actually have
+  src\agent.ts:2889:   * evidence yet — independent of which specific tool the model chose.
+  src\agent.ts:2890:   * This is what closes the gap where a plan with
+> src\agent.ts:2891:   * requiresVerification=false (e.g. a pure inspection task) had no
+  src\agent.ts:2892:   * gate at all preventing completion right after a single failed
+  src\agent.ts:2893:   * tool call and an empty model response.
+  src\agent.ts:2894:   *
+  src\agent.ts:2895:   * Reuses the existing hasInspectionEvidence/hasBuildEvidence/
+  src\agent.ts:2896:   * hasTestingEvidence checks — no new evidence logic, no tool-specific
+  src\agent.ts:2897:   * reasoning.
+  src\agent.ts:2898:   */
+  src\agent.ts:2899:  private getUnsatisfiedRequirements(
+  src\agent.ts:2900:    state: AgentState,
+  src\agent.ts:2901:  ): string[] {
+  src\agent.ts:2902:    const unsatisfied: string[] = [];
+  src\agent.ts:2903:
+  src\agent.ts:2904:    if (
+  src\agent.ts:2905:      state.plan.requiresInspection &&
+  src\agent.ts:2906:      !this.hasInspectionEvidence(
+  src\agent.ts:2907:        state,
+  src\agent.ts:2908:      )
+  src\agent.ts:2909:    ) {
+  src\agent.ts:2910:      unsatisfied.push(
+  src\agent.ts:2911:        "inspection evidence (no successful inspection tool call yet)",
+  src\agent.ts:2912:      );
+  src\agent.ts:2913:    }
+  src\agent.ts:2914:
+  src\agent.ts:2915:    if (
+  src\agent.ts:2916:      state.plan.requiresBuild &&
+  src\agent.ts:2927:        state,
+  src\agent.ts:2928:      )
+  src\agent.ts:2929:    ) {
+  src\agent.ts:2930:      unsatisfied.push(
+  src\agent.ts:2931:        "testing evidence (no successful runtime test yet)",
+  src\agent.ts:2932:      );
+  src\agent.ts:2933:    }
+  src\agent.ts:2934:
+  src\agent.ts:2935:    return unsatisfied;
+  src\agent.ts:2936:  }
+  src\agent.ts:2937:
+  src\agent.ts:2938:  private hasPotentiallyCompletedWork(
+  src\agent.ts:2939:    state: AgentState,
+  src\agent.ts:2940:  ): boolean {
+  src\agent.ts:2941:    return (
+> src\agent.ts:2942:      state.executedTools.length >
+  src\agent.ts:2943:      0
+  src\agent.ts:2944:    );
+  src\agent.ts:2945:  }
+  src\agent.ts:2946:
+  src\agent.ts:2947:  private hasInspectionEvidence(
+  src\agent.ts:2948:    state: AgentState,
+  src\agent.ts:2949:  ): boolean {
+> src\agent.ts:2950:    return state.executedTools.some(
+  src\agent.ts:2951:      (execution) =>
+  src\agent.ts:2952:        execution.success &&
+  src\agent.ts:2953:        execution.name
+  src\agent.ts:2954:          .toLowerCase()
+  src\agent.ts:2955:          .match(
+  src\agent.ts:2956:            /inspect|find|get|list|read|search|tree|output|error/,
+  src\agent.ts:2957:          ) !== null,
+  src\agent.ts:2958:    );
+  src\agent.ts:2959:  }
+  src\agent.ts:2960:
+  src\agent.ts:2961:  private hasBuildEvidence(
+  src\agent.ts:2962:    state: AgentState,
+  src\agent.ts:2963:  ): boolean {
+> src\agent.ts:2964:    return state.executedTools.some(
+  src\agent.ts:2965:      (execution) =>
+  src\agent.ts:2966:        execution.success &&
+  src\agent.ts:2967:        (
+  src\agent.ts:2968:          this.tools.getGroup(
+  src\agent.ts:2969:            execution.name,
+  src\agent.ts:2970:          ) ===
+  src\agent.ts:2971:            "roblox-building" ||
+  src\agent.ts:2972:          execution.name
+  src\agent.ts:2973:            .toLowerCase()
+  src\agent.ts:2974:            .match(
+  src\agent.ts:2975:              /create|build|insert|modify|update|set_|move_|clone_|duplicate_/,
+  src\agent.ts:2976:            ) !== null
+  src\agent.ts:2977:        ),
+  src\agent.ts:2978:    );
+  src\agent.ts:2979:  }
+  src\agent.ts:2980:
+  src\agent.ts:2981:  private hasTestingEvidence(
+  src\agent.ts:2982:    state: AgentState,
+  src\agent.ts:2983:  ): boolean {
+> src\agent.ts:2984:    return state.executedTools.some(
+  src\agent.ts:2985:      (execution) =>
+  src\agent.ts:2986:        execution.success &&
+  src\agent.ts:2987:        (
+  src\agent.ts:2988:          this.tools.getGroup(
+  src\agent.ts:2989:            execution.name,
+  src\agent.ts:2990:          ) ===
+  src\agent.ts:2991:            "roblox-execution" ||
+  src\agent.ts:2992:          execution.name
+  src\agent.ts:2993:            .toLowerCase()
+  src\agent.ts:2994:            .match(
+  src\agent.ts:2995:              /playtest|test|run_game|start_play|get_output|get_errors/,
+  src\agent.ts:2996:            ) !== null
+  src\agent.ts:2997:        ),
+  src\agent.ts:2998:    );
+  src\agent.ts:2999:  }
+  src\agent.ts:3000:
+  src\agent.ts:3001:  private buildRecoveryMessage(
+  src\agent.ts:3002:    state: AgentState,
+> src\agent.ts:3003:    verification: VerificationState,
+  src\agent.ts:3004:  ): string {
+  src\agent.ts:3005:    return `
+> src\agent.ts:3006:VERIFICATION FAILED.
+  src\agent.ts:3007:
+  src\agent.ts:3008:Reason:
+> src\agent.ts:3009:${verification.reason}
+  src\agent.ts:3010:
+  src\agent.ts:3011:Evidence collected:
+> src\agent.ts:3012:${verification.evidence.join("\n") || "No usable evidence."}
+  src\agent.ts:3013:
+  src\agent.ts:3014:Required success criteria:
+  src\agent.ts:3015:${state.plan.successCriteria
+  src\agent.ts:3016:  .filter(
+  src\agent.ts:3017:    (criterion) =>
+  src\agent.ts:3018:      criterion.required,
+  src\agent.ts:3019:  )
+  src\agent.ts:3020:  .map(
+  src\agent.ts:3021:    (criterion) =>
+  src\agent.ts:3022:      `- ${criterion.id}: ${criterion.description}`,
+  src\agent.ts:3023:  )
+  src\agent.ts:3024:  .join("\n")}
+  src\agent.ts:3025:
+  src\agent.ts:3026:Do not claim completion.
+  src\agent.ts:3027:
+  src\agent.ts:3028:Recover autonomously:
+  src\agent.ts:3029:1. Inspect the current state.
+  src\agent.ts:3030:2. Identify exactly what is missing or incorrect.
+  src\agent.ts:3031:3. Make the smallest safe correction.
+  src\agent.ts:3032:4. Test it when necessary.
+  src\agent.ts:3033:5. Verify it again.
+  src\agent.ts:3034:
+  src\agent.ts:3035:Do not repeat a failed operation without diagnosing why it failed.
+  src\agent.ts:3036:`;
+  src\agent.ts:3037:  }
+  src\agent.ts:3038:
+  src\agent.ts:3039:  private buildSuccessfulResponse(
+  src\agent.ts:3040:    state: AgentState,
+  src\agent.ts:3041:    fallbackContent: string,
+  src\agent.ts:3042:  ): string {
+  src\agent.ts:3043:    const criteria =
+  src\agent.ts:3044:      state.plan.successCriteria
+  src\agent.ts:3045:        .filter(
+  src\agent.ts:3046:          (criterion) =>
+  src\agent.ts:3047:            criterion.required,
+  src\agent.ts:3048:        )
+  src\agent.ts:3049:        .map(
+  src\agent.ts:3050:          (criterion) => {
+  src\agent.ts:3051:            const check =
+> src\agent.ts:3052:              state.verification.checks.find(
+  src\agent.ts:3053:                (item) =>
+  src\agent.ts:3054:                  item.id ===
+  src\agent.ts:3055:                  criterion.id,
+  src\agent.ts:3056:              );
+  src\agent.ts:3057:
+  src\agent.ts:3058:            return check?.passed
+  src\agent.ts:3059:              ? `✓ ${criterion.description}`
+  src\agent.ts:3060:              : `✓ ${criterion.description}`;
+  src\agent.ts:3061:          },
+  src\agent.ts:3062:        );
+  src\agent.ts:3063:
+  src\agent.ts:3064:    if (
+  src\agent.ts:3065:      criteria.length === 0
+  src\agent.ts:3066:    ) {
+  src\agent.ts:3067:      return (
+  src\agent.ts:3068:        fallbackContent ||
+  src\agent.ts:3069:        "Task completed and verified."
+  src\agent.ts:3070:      );
+  src\agent.ts:3071:    }
+  src\agent.ts:3072:
+  src\agent.ts:3073:    return `
+  src\agent.ts:3074:Task completed and verified.
+  src\agent.ts:3075:
+  src\agent.ts:3076:${criteria.join("\n")}
+  src\agent.ts:3077:`;
+  src\agent.ts:3078:  }
+  src\agent.ts:3079:
+  src\agent.ts:3080:  private buildFailureResponse(
+  src\agent.ts:3081:    state: AgentState,
+  src\agent.ts:3082:  ): string {
+  src\agent.ts:3083:    const failedTools =
+> src\agent.ts:3084:      state.executedTools
+  src\agent.ts:3085:        .filter(
+  src\agent.ts:3086:          (execution) =>
+  src\agent.ts:3087:            !execution.success,
+  src\agent.ts:3088:        )
+  src\agent.ts:3089:        .map(
+  src\agent.ts:3090:          (execution) =>
+  src\agent.ts:3091:            execution.name,
+  src\agent.ts:3092:        );
+  src\agent.ts:3093:
+  src\agent.ts:3094:    const uniqueFailedTools =
+  src\agent.ts:3095:      [...new Set(
+  src\agent.ts:3096:        failedTools,
+  src\agent.ts:3097:      )];
+  src\agent.ts:3098:
+  src\agent.ts:3099:    const reason =
+> src\agent.ts:3100:      state.studioContext.status ===
+  src\agent.ts:3101:        "unavailable" &&
+> src\agent.ts:3102:      state.studioContext.error
+> src\agent.ts:3103:        ? state.studioContext.error
+> src\agent.ts:3104:        : state.verification.reason ||
+  src\agent.ts:3105:          state.errors.at(-1)
+  src\agent.ts:3106:            ?.message ||
+  src\agent.ts:3107:          "Insufficient evidence.";
+  src\agent.ts:3108:
+  src\agent.ts:3109:    return `
+  src\agent.ts:3110:I could not honestly verify that the requested task was completed.
+  src\agent.ts:3111:
+  src\agent.ts:3112:Reason:
+  src\agent.ts:3113:${this.truncate(
+  src\agent.ts:3114:  reason,
+  src\agent.ts:3115:  MAX_ERROR_CHARS,
+  src\agent.ts:3116:)}
+  src\agent.ts:3117:${
+  src\agent.ts:3118:  uniqueFailedTools.length > 0
+  src\agent.ts:3119:    ? `\nFailed tools: ${uniqueFailedTools.join(", ")}`
+  src\agent.ts:3120:    : ""
+  src\agent.ts:3121:}
+  src\agent.ts:3122:
+  src\agent.ts:3123:No completion claim was made because the required result was not sufficiently 
+verified.
+  src\agent.ts:3124:`;
+  src\agent.ts:3125:  }
+  src\agent.ts:3126:
+  src\agent.ts:3127:  private fail(
+  src\agent.ts:3128:    state: AgentState,
+  src\agent.ts:3129:    reason: string,
+  src\agent.ts:3436:        text.includes(pattern),
+  src\agent.ts:3437:    );
+  src\agent.ts:3438:  }
+  src\agent.ts:3439:
+  src\agent.ts:3440:  private detectTerminalIntent(
+  src\agent.ts:3441:    text: string,
+  src\agent.ts:3442:  ): boolean {
+  src\agent.ts:3443:    const patterns = [
+  src\agent.ts:3444:      "run command",
+  src\agent.ts:3445:      "terminal",
+  src\agent.ts:3446:      "powershell",
+  src\agent.ts:3447:      "npm ",
+  src\agent.ts:3448:      "node ",
+  src\agent.ts:3449:      "git ",
+  src\agent.ts:3450:      "install ",
+> src\agent.ts:3451:      "execute command",
+  src\agent.ts:3452:      "shell",
+  src\agent.ts:3453:    ];
+  src\agent.ts:3454:
+  src\agent.ts:3455:    return patterns.some(
+  src\agent.ts:3456:      (pattern) =>
+  src\agent.ts:3457:        text.includes(pattern),
+  src\agent.ts:3458:    );
+  src\agent.ts:3459:  }
+  src\agent.ts:3460:
+  src\agent.ts:3461:  private detectDestructiveIntent(
+  src\agent.ts:3462:    text: string,
+  src\agent.ts:3463:  ): boolean {
+  src\agent.ts:3464:    const patterns = [
+  src\agent.ts:3465:      "delete",
+  src\agent.ts:3466:      "destroy",
+  src\agent.ts:3467:      "remove",
+  src\agent.ts:3468:      "wipe",
+  src\agent.ts:3469:      "clear",
+  src\agent.ts:3470:      "purge",
+  src\agent.ts:3471:      "reset",
+  src\agent.ts:3472:      "shutdown",
+  src\agent.ts:3473:      "replace everything",
+  src\agent.ts:3474:      "replace all",
+  src\agent.ts:3475:      "start over",
+  src\agent.ts:3476:      "remove all",
+  src\agent.ts:3483:        text.includes(pattern),
+  src\agent.ts:3484:    );
+  src\agent.ts:3485:  }
+  src\agent.ts:3486:
+  src\agent.ts:3487:  /* ==========================================================================
+  src\agent.ts:3488:   * SUCCESS CRITERIA
+  src\agent.ts:3489:   * ======================================================================== */
+  src\agent.ts:3490:
+  src\agent.ts:3491:  private buildSuccessCriteria(
+  src\agent.ts:3492:    input: {
+  src\agent.ts:3493:      message: string;
+  src\agent.ts:3494:  needsRoblox: boolean;
+  src\agent.ts:3495:  requiresInspection: boolean;
+  src\agent.ts:3496:  requiresBuild: boolean;
+  src\agent.ts:3497:  requiresTesting: boolean;
+> src\agent.ts:3498:  requiresVerification: boolean;
+  src\agent.ts:3499:  needsFiles: boolean;
+  src\agent.ts:3500:  needsTerminal: boolean;
+  src\agent.ts:3501:    },
+  src\agent.ts:3502:  ): SuccessCriterion[] {
+  src\agent.ts:3503:    const criteria:
+  src\agent.ts:3504:      SuccessCriterion[] = [];
+  src\agent.ts:3505:
+  src\agent.ts:3506:    criteria.push({
+  src\agent.ts:3507:      id: "objective",
+  src\agent.ts:3508:
+  src\agent.ts:3509:      description:
+  src\agent.ts:3510:        "The user's requested outcome exists or has been truthfully determined 
+impossible.",
+  src\agent.ts:3511:
+  src\agent.ts:3512:      required: true,
+  src\agent.ts:3513:    });
+  src\agent.ts:3514:
+  src\agent.ts:3515:    if (
+  src\agent.ts:3516:      input.needsRoblox
+  src\agent.ts:3517:    ) {
+  src\agent.ts:3518:      criteria.push({
+  src\agent.ts:3519:        id: "roblox-state",
+  src\agent.ts:3520:
+  src\agent.ts:3521:        description:
+  src\agent.ts:3522:          "The requested Roblox Studio state is actually present.",
+  src\agent.ts:3523:
+  src\agent.ts:3524:        required:
+  src\agent.ts:3525:          input.requiresBuild ||
+  src\agent.ts:3526:          input.requiresTesting ||
+> src\agent.ts:3527:          input.requiresVerification ||
+  src\agent.ts:3528:          input.requiresInspection,
+  src\agent.ts:3529:      });
+  src\agent.ts:3530:    }
+  src\agent.ts:3531:
+  src\agent.ts:3532:    if (
+  src\agent.ts:3533:      input.requiresTesting
+  src\agent.ts:3534:    ) {
+  src\agent.ts:3535:      criteria.push({
+  src\agent.ts:3536:        id: "runtime",
+  src\agent.ts:3537:
+  src\agent.ts:3538:        description:
+  src\agent.ts:3539:          "The requested Roblox behavior has been runtime tested successfully.",
+  src\agent.ts:3540:
+  src\agent.ts:3541:        required: input.requiresTesting ||
+> src\agent.ts:3542:          input.requiresVerification,
+  src\agent.ts:3543:      });
+  src\agent.ts:3544:
+  src\agent.ts:3545:      criteria.push({
+  src\agent.ts:3546:        id: "runtime-errors",
+  src\agent.ts:3547:
+  src\agent.ts:3548:        description:
+  src\agent.ts:3549:          "The relevant runtime test does not contain blocking errors.",
+  src\agent.ts:3550:
+  src\agent.ts:3551:        required: input.requiresTesting ||
+> src\agent.ts:3552:          input.requiresVerification,
+  src\agent.ts:3553:      });
+  src\agent.ts:3554:    }
+  src\agent.ts:3555:
+  src\agent.ts:3556:    if (
+  src\agent.ts:3557:      input.needsFiles
+  src\agent.ts:3558:    ) {
+  src\agent.ts:3559:      criteria.push({
+  src\agent.ts:3560:        id: "files",
+  src\agent.ts:3561:
+  src\agent.ts:3562:        description:
+  src\agent.ts:3563:          "Requested source files exist with the intended contents.",
+  src\agent.ts:3564:
+  src\agent.ts:3565:        required: input.needsFiles ||
+> src\agent.ts:3566:          input.requiresVerification,
+  src\agent.ts:3567:      });
+  src\agent.ts:3568:    }
+  src\agent.ts:3569:
+  src\agent.ts:3570:    if (
+  src\agent.ts:3571:      input.needsTerminal
+  src\agent.ts:3572:    ) {
+  src\agent.ts:3573:      criteria.push({
+  src\agent.ts:3574:        id: "commands",
+  src\agent.ts:3575:
+  src\agent.ts:3576:        description:
+> src\agent.ts:3577:          "Requested commands execute successfully.",
+  src\agent.ts:3578:
+  src\agent.ts:3579:        required: input.needsTerminal ||
+> src\agent.ts:3580:          input.requiresVerification,
+  src\agent.ts:3581:      });
+  src\agent.ts:3582:    }
+  src\agent.ts:3583:
+  src\agent.ts:3584:    return criteria;
+  src\agent.ts:3585:  }
+  src\agent.ts:3586:
+  src\agent.ts:3587:  /* ==========================================================================
+  src\agent.ts:3588:   * INITIAL PROMPT
+  src\agent.ts:3589:   * ======================================================================== */
+  src\agent.ts:3590:
+  src\agent.ts:3591:  private createInitialMessages(
+  src\agent.ts:3592:    state: AgentState,
+  src\agent.ts:3593:  ): AIMessage[] {
+  src\agent.ts:3594:    return [
+  src\agent.ts:3595:      {
+  src\agent.ts:3596:        role: "system",
+  src\agent.ts:3597:
+  src\agent.ts:3598:        content:
+  src\agent.ts:3599:          this.buildSystemPrompt(
+  src\agent.ts:3600:            state,
+  src\agent.ts:3601:          ),
+  src\agent.ts:3602:      },
+  src\agent.ts:3603:
+  src\agent.ts:3604:      {
+  src\agent.ts:3605:        role: "user",
+  src\agent.ts:3654:
+  src\agent.ts:3655:10. MAKE THE SMALLEST SAFE CHANGE.
+  src\agent.ts:3656:    Do not restructure unrelated parts of the project.
+  src\agent.ts:3657:
+  src\agent.ts:3658:==================================================
+  src\agent.ts:3659:ROBLOX STUDIO SESSION
+  src\agent.ts:3660:==================================================
+  src\agent.ts:3661:
+  src\agent.ts:3662:studio_id is resolved and supplied automatically by the runtime for
+  src\agent.ts:3663:Roblox tools that need it. Call Roblox tools without worrying about
+  src\agent.ts:3664:studio_id — you do not need to discover it, remember it, or pass it
+  src\agent.ts:3665:yourself. If a Roblox tool still fails, the failure is about something
+  src\agent.ts:3666:else (bad arguments, the operation itself, etc.), not a missing
+  src\agent.ts:3667:session.
+  src\agent.ts:3668:
+> src\agent.ts:3669:Current status: ${this.describeStudioContext(state)}
+  src\agent.ts:3670:
+  src\agent.ts:3671:==================================================
+  src\agent.ts:3672:ROBLOX RULES
+  src\agent.ts:3673:==================================================
+  src\agent.ts:3674:
+  src\agent.ts:3675:For Roblox tasks:
+  src\agent.ts:3676:
+  src\agent.ts:3677:- Roblox Studio is the target environment.
+  src\agent.ts:3678:- Use inspection tools to understand the current state.
+  src\agent.ts:3679:- Use building tools to make actual Studio changes.
+  src\agent.ts:3680:- Use execution/playtest tools to validate behavior.
+  src\agent.ts:3681:- Use output/error tools to diagnose runtime failures.
+  src\agent.ts:3682:- Never assume an object exists.
+> src\agent.ts:3683:- Never assume a script executed correctly.
+  src\agent.ts:3684:- Never confuse source code on disk with live Roblox state.
+  src\agent.ts:3685:
+  src\agent.ts:3686:==================================================
+  src\agent.ts:3687:DESTRUCTIVE OPERATIONS
+  src\agent.ts:3688:==================================================
+  src\agent.ts:3689:
+  src\agent.ts:3690:Destructive operations include deleting, destroying, wiping, clearing, 
+resetting, replacing, or shutting down project content.
+  src\agent.ts:3691:
+  src\agent.ts:3692:Only perform destructive operations when the user's request clearly authorizes 
+them.
+  src\agent.ts:3693:
+  src\agent.ts:3694:Do not interpret a general request such as "build X" as permission to delete 
+unrelated content.
+  src\agent.ts:3695:
+  src\agent.ts:3696:==================================================
+  src\agent.ts:3697:CURRENT TASK
+  src\agent.ts:3698:==================================================
+  src\agent.ts:3699:
+  src\agent.ts:3700:Intent:
+  src\agent.ts:3701:${state.plan.intent}
+  src\agent.ts:3702:
+  src\agent.ts:3703:Capability:
+  src\agent.ts:3704:${state.plan.capability}
+  src\agent.ts:3705:
+  src\agent.ts:3706:Objective:
+  src\agent.ts:3707:${state.plan.objective}
+  src\agent.ts:3708:
+  src\agent.ts:3709:Needs Roblox:
+  src\agent.ts:3710:${state.plan.needsRoblox}
+  src\agent.ts:3711:
+  src\agent.ts:3712:Needs Build:
+  src\agent.ts:3713:${state.plan.requiresBuild}
+  src\agent.ts:3714:
+  src\agent.ts:3715:Needs Testing:
+  src\agent.ts:3716:${state.plan.requiresTesting}
+  src\agent.ts:3717:
+> src\agent.ts:3718:Needs Verification:
+> src\agent.ts:3719:${state.plan.requiresVerification}
+  src\agent.ts:3720:
+  src\agent.ts:3721:Needs Files:
+  src\agent.ts:3722:${state.plan.needsFiles}
+  src\agent.ts:3723:
+  src\agent.ts:3724:Needs Terminal:
+  src\agent.ts:3725:${state.plan.needsTerminal}
+  src\agent.ts:3726:
+  src\agent.ts:3727:Explicit Read-Only (do not modify/build/create anything):
+  src\agent.ts:3728:${state.plan.explicitReadOnly}
+  src\agent.ts:3729:${
+  src\agent.ts:3730:  state.plan.protectedTargets.length >
+  src\agent.ts:3731:  0
+  src\agent.ts:3732:    ? `\nProtected (do not modify, everything else is 
+allowed):\n${state.plan.protectedTargets
+  src\agent.ts:3733:        .map(
+  src\agent.ts:3734:          (target) => `- ${target}`,
+  src\agent.ts:3735:        )
+  src\agent.ts:3736:        .join("\n")}\n`
+  src\agent.ts:3737:    : ""
+  src\agent.ts:3738:}
+  src\agent.ts:3739:==================================================
+  src\agent.ts:3740:SUCCESS CRITERIA
+  src\agent.ts:3741:==================================================
+  src\agent.ts:3742:
+  src\agent.ts:3743:${state.plan.successCriteria
+  src\agent.ts:3744:  .map(
+  src\agent.ts:3745:    (criterion) =>
+  src\agent.ts:3746:      `- ${criterion.required ? "[REQUIRED]" : "[OPTIONAL]"} ${criterion.id}: 
+${criterion.description}`,
+  src\agent.ts:3747:  )
+  src\agent.ts:3748:  .join("\n")}
+  src\agent.ts:3749:
+  src\agent.ts:3750:==================================================
+  src\agent.ts:3751:EXECUTION STRATEGY
+  src\agent.ts:3752:==================================================
+  src\agent.ts:3753:
+  src\agent.ts:3754:Follow this lifecycle when appropriate:
+  src\agent.ts:3755:
+  src\agent.ts:3756:UNDERSTAND
+  src\agent.ts:3757:→ INSPECT
+  src\agent.ts:3758:→ PLAN
+  src\agent.ts:3759:→ BUILD
+> src\agent.ts:3760:→ EXECUTE
+  src\agent.ts:3761:→ TEST
+  src\agent.ts:3762:→ DEBUG
+  src\agent.ts:3763:→ VERIFY
+  src\agent.ts:3764:→ COMPLETE
+  src\agent.ts:3765:
+> src\agent.ts:3766:Do not skip verification merely because the last tool returned success.
+  src\agent.ts:3767:
+  src\agent.ts:3768:Do not provide a tutorial unless the user explicitly asks for instructions.
+  src\agent.ts:3769:
+  src\agent.ts:3770:If the requested task is possible with available tools, perform it.
+  src\agent.ts:3771:`;
+  src\agent.ts:3772:  }
+  src\agent.ts:3773:
+  src\agent.ts:3774:  /* ==========================================================================
+  src\agent.ts:3775:   * UTILITIES
+  src\agent.ts:3776:   * ======================================================================== */
+  src\agent.ts:3777:
+> src\agent.ts:3778:  private describeStudioContext(
+  src\agent.ts:3779:    state: AgentState,
+  src\agent.ts:3780:  ): string {
+  src\agent.ts:3781:    const context =
+> src\agent.ts:3782:      state.studioContext;
+  src\agent.ts:3783:
+  src\agent.ts:3784:    switch (context.status) {
+  src\agent.ts:3785:      case "not-needed":
+  src\agent.ts:3786:        return "Not needed for this task.";
+  src\agent.ts:3787:
+  src\agent.ts:3788:      case "resolved":
+  src\agent.ts:3789:        return `Resolved — studio_id=${context.studioId}${
+  src\agent.ts:3790:          context.studioName
+  src\agent.ts:3791:            ? ` (${context.studioName})`
+  src\agent.ts:3792:            : ""
+  src\agent.ts:3793:        }.`;
+  src\agent.ts:3794:
+  src\agent.ts:3795:      case "unavailable":
+  src\agent.ts:3796:        return `Unavailable — ${
+  src\agent.ts:3797:          context.error ??
+  src\agent.ts:3798:          "unknown reason"
+  src\agent.ts:3799:        }`;
+  src\agent.ts:3800:
+  src\agent.ts:3801:      case "unresolved":
+  src\agent.ts:3802:      default:
+  src\agent.ts:3803:        return "Not yet resolved.";
+  src\agent.ts:3804:    }
+  src\agent.ts:3805:  }
+  src\agent.ts:3806:
+  src\agent.ts:3807:  private serializeToolResult(
+  src\agent.ts:4122:    normalized: Record<
+  src\agent.ts:4123:      string,
+  src\agent.ts:4124:      unknown
+  src\agent.ts:4125:    >,
+  src\agent.ts:4126:    studioIdInjected: boolean,
+  src\agent.ts:4127:  ): void {
+  src\agent.ts:4128:    if (!studioIdInjected) {
+  src\agent.ts:4129:      return;
+  src\agent.ts:4130:    }
+  src\agent.ts:4131:
+  src\agent.ts:4132:    console.log(
+  src\agent.ts:4133:      `🧩 ${name}: studio_id injected automatically`,
+  src\agent.ts:4134:    );
+  src\agent.ts:4135:
+  src\agent.ts:4136:    console.log(
+> src\agent.ts:4137:      "📤 Executed arguments:",
+  src\agent.ts:4138:    );
+  src\agent.ts:4139:
+  src\agent.ts:4140:    console.log(
+  src\agent.ts:4141:      JSON.stringify(
+  src\agent.ts:4142:        normalized,
+  src\agent.ts:4143:        null,
+  src\agent.ts:4144:        2,
+  src\agent.ts:4145:      ),
+  src\agent.ts:4146:    );
+  src\agent.ts:4147:  }
+  src\agent.ts:4148:
+> src\agent.ts:4149:  private printStudioContext(
+  src\agent.ts:4150:    state: AgentState,
+  src\agent.ts:4151:  ): void {
+  src\agent.ts:4152:    console.log(
+  src\agent.ts:4153:      "\n🎬 ROBLOX CONTEXT",
+  src\agent.ts:4154:    );
+  src\agent.ts:4155:
+  src\agent.ts:4156:    console.log(
+  src\agent.ts:4157:      `   needsRoblox: ${state.plan.needsRoblox}`,
+  src\agent.ts:4158:    );
+  src\agent.ts:4159:
+  src\agent.ts:4160:    console.log(
+> src\agent.ts:4161:      `   status: ${state.studioContext.status}`,
+  src\agent.ts:4162:    );
+  src\agent.ts:4163:
+> src\agent.ts:4164:    if (state.studioContext.studioId) {
+  src\agent.ts:4165:      console.log(
+> src\agent.ts:4166:        `   studio_id: ${state.studioContext.studioId}`,
+  src\agent.ts:4167:      );
+  src\agent.ts:4168:
+  src\agent.ts:4169:      console.log(
+> src\agent.ts:4170:        `   studio_name: ${state.studioContext.studioName ?? "(unnamed)"}`,
+  src\agent.ts:4171:      );
+  src\agent.ts:4172:    }
+  src\agent.ts:4173:
+  src\agent.ts:4174:    if (
+> src\agent.ts:4175:      state.studioContext
+  src\agent.ts:4176:        .availableStudios &&
+> src\agent.ts:4177:      state.studioContext
+  src\agent.ts:4178:        .availableStudios.length > 1
+  src\agent.ts:4179:    ) {
+  src\agent.ts:4180:      console.log(
+> src\agent.ts:4181:        `   available studios: ${state.studioContext.availableStudios.length}`,
+  src\agent.ts:4182:      );
+  src\agent.ts:4183:    }
+  src\agent.ts:4184:
+> src\agent.ts:4185:    if (state.studioContext.error) {
+  src\agent.ts:4186:      console.log(
+> src\agent.ts:4187:        `   error: ${state.studioContext.error}`,
+  src\agent.ts:4188:      );
+  src\agent.ts:4189:    }
+  src\agent.ts:4190:  }
+  src\agent.ts:4191:
+  src\agent.ts:4192:  private printStudioDiscoveryAttempt(
+  src\agent.ts:4193:    toolName: string,
+  src\agent.ts:4194:    result: {
+  src\agent.ts:4195:      success: boolean;
+  src\agent.ts:4196:      error?: string;
+  src\agent.ts:4197:    },
+  src\agent.ts:4198:  ): void {
+  src\agent.ts:4199:    console.log(
+  src\agent.ts:4200:      `\n🔎 Studio discovery via ${toolName}: ${
+  src\agent.ts:4201:        result.success
+  src\agent.ts:4202:          ? "SUCCESS"
+  src\agent.ts:4203:          : "FAILED"
+  src\agent.ts:4204:      }`,
+  src\agent.ts:4205:    );
+  src\agent.ts:4206:
+  src\agent.ts:4207:    if (!result.success) {
+  src\agent.ts:4208:      console.log(
+  src\agent.ts:4209:        `   ${result.error}`,
+  src\agent.ts:4210:      );
+  src\agent.ts:4211:    }
+  src\agent.ts:4212:  }
+
+

@@ -1,0 +1,15 @@
+{
+  "models": [
+    {
+      "provider": "ollama",
+      "model": "qwen3:8b",
+      "capabilities": [
+        "chat",
+        "planning",
+        "coding",
+        "debugging",
+        "analysis"
+      ]
+    }
+  ]
+}
