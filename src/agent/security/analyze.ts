@@ -147,15 +147,15 @@ const RULES: PatternRule[] = [
     code: "PAYLOAD-UNVALIDATED",
     category: "payload-validation",
     contexts: {
-      Server: "INFO",
-      Shared: "INFO",
+      Server: "HIGH",
+      Shared: "MEDIUM",
     },
     test: /OnServerEvent\s*:|OnInvoke\s*\(/,
     predicate: (source) =>
       /SetAsync|UpdateAsync|AddAsync|RemoveAsync|\.Value\s*=\s*|\bValue\s*=\s*/.test(
         source,
       ) &&
-      !/tonumber|typeof|pcall|math\.clamp|>=\s*|<=|type\s*\(/.test(
+      !/tonumber|typeof|pcall|math\.clamp|math\.min|math\.max|whitelist|allowlist|cooldown|assert|GetAttribute|>=|<=|type\s*\(|:IsA\(/.test(
         source,
       ),
     message:

@@ -372,6 +372,92 @@ const DEFAULT_ELEMENT_NAMES: Record<
   "character-script": "CharacterController",
 };
 
+/* ============================================================================
+ * DETERMINISTIC STRUCTURE: idempotent role-folder creation
+ *
+ * Generates a canonical, idempotent Luau script that walks every role
+ * folder path from the layout (e.g. "ServerScriptService.Services") and
+ * creates any missing Folder so the agent's build edits always land in a
+ * folder that already exists. Never renames, deletes, or overwrites an
+ * existing instance — it strictly creates what is missing.
+ * ========================================================================== */
+
+function luauStringLiteral(value: string): string {
+  return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+function rootTabPath(slug: string): string {
+  return slug
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/(^-|-$)/g, "");
+}
+
+export function renderEnsureFoldersScript(
+  folders: readonly string[],
+): string {
+  const unique = [
+    ...new Set(folders).values(),
+  ]
+
+  if (unique.length === 0) {
+    return "";
+  }
+
+  const chains = unique
+    .map((path) =>
+      path
+        .split(".")
+        .filter(
+          (segment) =>
+            segment.length > 0,
+        ),
+    )
+    .filter(
+      (segments) =>
+        segments.length >= 2,
+    );
+
+  if (chains.length === 0) {
+    return "";
+  }
+
+  const tableRows = chains
+    .map((segments) => {
+      const literals = segments.map(
+        luauStringLiteral,
+      );
+      return `  { ${literals.join(", ")} },`;
+    })
+    .join("\n");
+
+  const tab = rootTabPath(
+    chains[0][0] ?? "structure",
+  );
+
+  return `--[[ deterministic structure ensure: created by the agent runtime ]]
+local ensureFolders = {
+${tableRows}
+}
+
+for _, segments in ipairs(ensureFolders) do
+	local current = game
+	for _, name in ipairs(segments) do
+		local existing = current:FindFirstChild(name)
+		if existing then
+			current = existing
+		elseif name ~= "StarterPlayerScripts" and name ~= "ReplicatedFirst" and name ~= "ReplicatedStorage" and name ~= "ServerScriptService" and name ~= "ServerStorage" and name ~= "StarterGui" and name ~= "Workspace" and name ~= "Lighting" and name ~= "StarterCharacterScripts" then
+			local folder = Instance.new("Folder")
+			folder.Name = name
+			folder.Parent = current
+			current = folder
+		end
+	end
+end
+
+print("agent_structure_ensure:ok:${tab}")`;
+}
+
 export function safeInstanceName(
   name: string | undefined,
   fallback: string,

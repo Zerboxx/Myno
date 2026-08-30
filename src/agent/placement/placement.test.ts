@@ -6,6 +6,7 @@ import {
   buildLayout,
   detectElementRoles,
   extractExplicitElementName,
+  renderEnsureFoldersScript,
   resolvePlacement,
   safeInstanceName,
 } from "./rules.js";
@@ -329,6 +330,41 @@ test("applyPlacementHints ignores paths outside the layout", () => {
   );
 
   assert.deepEqual(result.applied, []);
+});
+
+test("renderEnsureFoldersScript emits one chain per role folder", () => {
+  const code = renderEnsureFoldersScript([
+    "ServerScriptService.Services",
+    "ReplicatedStorage.Shared",
+    "StarterPlayer.StarterPlayerScripts.Controllers",
+  ]);
+
+  assert.match(code, /ServerScriptService/);
+  assert.match(code, /"Services"/);
+  assert.match(code, /"ReplicatedStorage"/);
+  assert.match(code, /"Shared"/);
+  assert.match(code, /"Controllers"/);
+  assert.match(code, /Instance\.new\("Folder"\)/);
+  assert.ok(!code.includes("-- TODO"));
+});
+
+test("renderEnsureFoldersScript dedupes paths and returns empty for none", () => {
+  assert.equal(renderEnsureFoldersScript([]), "");
+  assert.equal(
+    renderEnsureFoldersScript(
+      [
+        "ServerScriptService.Services",
+        "ServerScriptService.Services",
+      ],
+    ),
+    renderEnsureFoldersScript([
+      "ServerScriptService.Services",
+    ]),
+  );
+  assert.equal(
+    renderEnsureFoldersScript(["ServerScriptService"]),
+    "",
+  );
 });
 
 function buildLayoutForShop() {

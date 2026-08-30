@@ -15,6 +15,7 @@ import {
 
 import {
   ToolRegistry,
+  isRobloxExecutionTool,
   isStudioDiscoveryTool,
   type ToolGroup,
 } from "./tools/registry.js";
@@ -72,6 +73,7 @@ import {
 import {
   applyPlacementHints,
   buildLayout,
+  renderEnsureFoldersScript,
 } from "./agent/placement/rules.js";
 import {
   buildSecurityDirectiveLines,
@@ -679,6 +681,14 @@ export class Agent {
         };
       }
     }
+
+    /*
+     * Deterministic game-tree structure: before the model starts
+     * building, the runtime ensures every role folder from the layout
+     * exists in the live Studio (idempotent). The model's build edits
+     * then always land in a real Folder.
+     */
+    await this.ensureStructuralFolders(state);
 
     /*
      * ================================================================
@@ -1388,6 +1398,117 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       );
 
     return fallback?.function.name ?? null;
+  }
+
+  /**
+   * Determinstic game-tree structure guarantee: before the model starts
+   * building, the runtime itself ensures every role folder from the
+   * placement layout (e.g. ServerScriptService.Services) exists in the
+   * live Studio — idempotently, via a canonical script. The model is
+   * never asked to remember to create folders; the folder already exists
+   * when its first multi_edit lands. Never renames/deletes/overwrites.
+   */
+  private async ensureStructuralFolders(
+    state: AgentState,
+  ): Promise<void> {
+    if (
+      state.studioContext.status !==
+        "resolved" ||
+      !state.studioContext.studioId
+    ) {
+      return;
+    }
+
+    const folders =
+      state.plan.placement?.folders;
+
+    if (
+      !folders ||
+      folders.length === 0
+    ) {
+      return;
+    }
+
+    const code =
+      renderEnsureFoldersScript(
+        folders,
+      );
+
+    if (code.length === 0) {
+      return;
+    }
+
+    const executionTool = this.tools
+      .list()
+      .find((tool) =>
+        isRobloxExecutionTool(tool.name),
+      );
+
+    if (!executionTool) {
+      console.log(
+        "[structure] skip: no roblox_execute_luau tool registered",
+      );
+      return;
+    }
+
+    const definition = this.tools
+      .getAIDefinitions()
+      .find(
+        (item) =>
+          item.function.name ===
+          executionTool.name,
+      );
+
+    const properties = (
+      definition?.function
+        .parameters as
+        | {
+            properties?: Record<
+              string,
+              unknown
+            >;
+          }
+        | undefined
+    )?.properties;
+
+    const studioIdKey =
+      findStudioIdParameterKey(
+        properties,
+      );
+
+    const executedInput: Record<string, unknown> =
+      {
+        code,
+      };
+
+    if (
+      studioIdKey &&
+      state.studioContext.studioId
+    ) {
+      executedInput[studioIdKey] =
+        state.studioContext.studioId;
+    }
+
+    const executed = await this.tools.execute(
+      executionTool.name,
+      executedInput,
+      {
+        sessionId: this.sessionId,
+      },
+    );
+
+    if (!executed.success) {
+      console.log(
+        `[structure] skip: folder ensure failed (${executed.error ?? "tool error"}); the prompt still instructs folder creation`,
+      );
+      return;
+    }
+
+    for (const folder of folders) {
+      console.log(
+        `[structure] ensured folder ${folder}`,
+      );
+    }
   }
 
   /**

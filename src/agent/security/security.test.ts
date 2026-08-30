@@ -180,7 +180,7 @@ test("OnServerEvent wired in a LocalScript is a mismatch (MEDIUM)", () => {
   assert.equal(hit.severity, "MEDIUM");
 });
 
-test("unvalidated remote handler mutating state raises INFO, never blocks", () => {
+test("unvalidated remote handler mutating state is a HIGH blocking finding", () => {
   const findings = analyzeArtifacts([
     {
       path: "ServerScriptService.Services.Wallet",
@@ -194,7 +194,8 @@ test("unvalidated remote handler mutating state raises INFO, never blocks", () =
     (f) => f.code === "PAYLOAD-UNVALIDATED",
   );
   assert.ok(hit);
-  assert.equal(hit.severity, "INFO");
+  assert.equal(hit.severity, "HIGH");
+  assert.equal(hit.context, "Server");
 
   const review = buildSecurityReview([
     {
@@ -204,7 +205,28 @@ test("unvalidated remote handler mutating state raises INFO, never blocks", () =
         'remote.OnServerEvent:Connect(function(player, amount) ds:SetAsync(player.UserId, amount) end)',
     },
   ]);
-  assert.deepEqual(review.blocking, []);
+  assert.deepEqual(
+    review.blocking.map((f) => f.code),
+    ["PAYLOAD-UNVALIDATED"],
+  );
+});
+
+test("the same unvalidated handler shared is MEDIUM and never blocks", () => {
+  const sharedReview = buildSecurityReview([
+    {
+      path: "ReplicatedStorage.Shared.Wallet",
+      className: "ModuleScript",
+      source:
+        'remote.OnServerEvent:Connect(function(player, amount) ds:GetDataStore("C"):SetAsync(player.UserId, amount) end)',
+    },
+  ]);
+
+  const hit = sharedReview.findings.find(
+    (f) => f.code === "PAYLOAD-UNVALIDATED",
+  );
+  assert.ok(hit);
+  assert.equal(hit.severity, "MEDIUM");
+  assert.deepEqual(sharedReview.blocking, []);
 });
 
 test("a handler that validates payloads does not raise PAYLOAD-UNVALIDATED", () => {
