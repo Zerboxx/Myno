@@ -15,7 +15,6 @@ import {
 
 import {
   ToolRegistry,
-  isRobloxExecutionTool,
   isStudioDiscoveryTool,
   type ToolGroup,
 } from "./tools/registry.js";
@@ -1441,7 +1440,9 @@ Continue until the user's requested outcome is actually achieved and verifiable.
     const executionTool = this.tools
       .list()
       .find((tool) =>
-        isRobloxExecutionTool(tool.name),
+        /execute_luau|execute_code|run_luau|run_script/i.test(
+          tool.name,
+        ),
       );
 
     if (!executionTool) {
@@ -1479,6 +1480,7 @@ Continue until the user's requested outcome is actually achieved and verifiable.
     const executedInput: Record<string, unknown> =
       {
         code,
+        datamodel_type: "Edit",
       };
 
     if (
