@@ -1,8 +1,20 @@
 /**
  * P3.6-D — Context Isolation
  *
- * Ensures context from one task never leaks into another.
- * Enforces cross-task and cross-scope isolation guarantees.
+ * BLOCKER #23 reimplementation. Prior version granted cross-task reads
+ * ("read access allowed") and verifyTaskIsolation() returned true
+ * unconditionally — isolation was effectively unimplemented. This
+ * version is DENY BY DEFAULT:
+ *
+ *   - unknown scope / unbound scope / no task binding        → DENY
+ *   - cross-task scope read/write/inherit                    → DENY
+ *   - cross-scope read (concurrent scopes, same task)        → DENY
+ *   - evidence owned by a different scope                    → DENY
+ *   - write/inherit from any other scope                     → DENY
+ *   - same canonical scope, same task, owned evidence        → ALLOW
+ *
+ * Isolation is enforced in the EXECUTED path (ContextActivationService
+ * calls verifyEvidenceAccess before assembly) — never left to the LLM.
  */
 
 import type {
@@ -20,10 +32,21 @@ import type {
 
 /**
  * Manages context isolation between tasks and scopes.
+ * All access decisions default to DENY.
  */
 export class ContextIsolationManager {
   private readonly taskScopes = new Map<string, Set<ContextScopeId>>();
   private readonly scopeEvidence = new Map<ContextScopeId, Set<ContextEvidenceId>>();
+  /**
+   * Canonical scope → task binding. A scope may be bound to exactly one
+   * task; rebinding to a different task is a violation.
+   */
+  private readonly scopeToTask = new Map<ContextScopeId, string>();
+  /**
+   * Canonical evidence → scope ownership. An evidence ID may be owned by
+   * exactly one scope; reuse across scopes is a violation.
+   */
+  private readonly evidenceOwner = new Map<ContextEvidenceId, ContextScopeId>();
   private readonly crossScopeAccessLog: Array<{
     sourceScopeId: ContextScopeId;
     targetScopeId: ContextScopeId;
@@ -34,8 +57,16 @@ export class ContextIsolationManager {
 
   /**
    * Register a scope for a task.
+   * BLOCKER #23: refusing to rebind a scope to a different task.
    */
   registerScope(taskId: string, scopeId: ContextScopeId): void {
+    const boundTask = this.scopeToTask.get(scopeId);
+    if (boundTask !== undefined && boundTask !== taskId) {
+      throw new Error(
+        `Context isolation violation: scope ${scopeId} is already bound to task "${boundTask}", cannot rebind to "${taskId}"`,
+      );
+    }
+    this.scopeToTask.set(scopeId, taskId);
     const scopes = this.taskScopes.get(taskId) ?? new Set();
     scopes.add(scopeId);
     this.taskScopes.set(taskId, scopes);
@@ -43,8 +74,18 @@ export class ContextIsolationManager {
 
   /**
    * Register evidence for a scope.
+   * BLOCKER #23: an evidence ID can be owned by exactly one scope.
    */
   registerEvidence(scopeId: ContextScopeId, evidenceIds: ContextEvidenceId[]): void {
+    for (const id of evidenceIds) {
+      const owner = this.evidenceOwner.get(id);
+      if (owner !== undefined && owner !== scopeId) {
+        throw new Error(
+          `Context isolation violation: evidence ${id} is already owned by scope ${owner}, cannot register to ${scopeId}`,
+        );
+      }
+      this.evidenceOwner.set(id, scopeId);
+    }
     const set = this.scopeEvidence.get(scopeId) ?? new Set();
     for (const id of evidenceIds) {
       set.add(id);
@@ -53,8 +94,46 @@ export class ContextIsolationManager {
   }
 
   /**
-   * Check if a scope can access evidence from another scope.
-   * Enforces isolation rules.
+   * DENY-BY-DEFAULT check run at the activation boundary BEFORE assembly.
+   * Verifies the canonical scope→task binding and evidence→scope
+   * ownership for every evidence ID that is about to enter the context.
+   */
+  verifyEvidenceAccess(input: {
+    taskId: string;
+    scopeId: ContextScopeId;
+    evidenceIds: ContextEvidenceId[];
+  }): { allowed: boolean; reasons: string[] } {
+    const reasons: string[] = [];
+
+    const boundTask = this.scopeToTask.get(input.scopeId);
+    if (boundTask !== undefined && boundTask !== input.taskId) {
+      return {
+        allowed: false,
+        reasons: ["scope-bound-to-different-task"],
+      };
+    }
+
+    for (const id of input.evidenceIds) {
+      const owner = this.evidenceOwner.get(id);
+      if (owner !== undefined && owner !== input.scopeId) {
+        reasons.push(`evidence-owned-by-other-scope:${id}`);
+      }
+    }
+
+    return {
+      allowed: reasons.length === 0,
+      reasons,
+    };
+  }
+
+  /**
+   * DENY-BY-DEFAULT scope access check.
+   *
+   * Same canonical scope: allowed for reading evidence the scope owns,
+   * when the scope is bound to a task. Everything else is denied:
+   * cross-scope reads (concurrent scopes never read each other's
+   * evidence), cross-task reads, items this scope does not own, and all
+   * writes/inherits from another scope.
    */
   canAccessEvidence(input: {
     sourceScopeId: ContextScopeId;
@@ -64,31 +143,33 @@ export class ContextIsolationManager {
   }): { allowed: boolean; reason: string } {
     const { sourceScopeId, targetScopeId, evidenceId, accessType } = input;
 
-    // Same scope = always allowed
-    if (sourceScopeId === targetScopeId) {
-      this.logAccess(sourceScopeId, targetScopeId, accessType, true, "same scope");
-      return { allowed: true, reason: "same scope" };
+    // Default: DENY.
+    let allowed = false;
+    let reason = "access denied by default";
+
+    const sourceTask = this.scopeToTask.get(sourceScopeId);
+    const targetTask = this.scopeToTask.get(targetScopeId);
+
+    if (sourceTask === undefined || targetTask === undefined) {
+      reason = "scope not bound to a task";
+    } else if (sourceTask !== targetTask) {
+      reason = "cross-task access denied";
+    } else if (sourceScopeId !== targetScopeId) {
+      // Concurrent scopes of the same task never read each other's evidence.
+      reason = "cross-scope access denied";
+    } else if (this.evidenceOwner.get(evidenceId) !== sourceScopeId) {
+      reason = "evidence not owned by source scope";
+    } else if (!(this.scopeEvidence.get(sourceScopeId)?.has(evidenceId) ?? false)) {
+      reason = "evidence not registered to source scope";
+    } else if (accessType === "read") {
+      allowed = true;
+      reason = "same scope owned evidence read";
+    } else {
+      reason = "write/inherit not allowed without explicit permission";
     }
 
-    // Check if evidence belongs to target scope
-    const targetEvidence = this.scopeEvidence.get(targetScopeId) ?? new Set();
-    if (!targetEvidence.has(evidenceId)) {
-      this.logAccess(sourceScopeId, targetScopeId, accessType, false, "evidence not in target scope");
-      return { allowed: false, reason: "evidence not in target scope" };
-    }
-
-    // Check task isolation
-    // Different tasks = no access unless explicitly allowed
-    // (This would need scope-to-task mapping which we'd get from lifecycle manager)
-    // For now, we log and allow reads for reference purposes
-    if (accessType === "read") {
-      this.logAccess(sourceScopeId, targetScopeId, accessType, true, "read access allowed");
-      return { allowed: true, reason: "read access allowed" };
-    }
-
-    // Write/inherit requires explicit permission
-    this.logAccess(sourceScopeId, targetScopeId, accessType, false, "write/inherit not allowed without permission");
-    return { allowed: false, reason: "write/inherit not allowed without explicit permission" };
+    this.logAccess(sourceScopeId, targetScopeId, accessType, allowed, reason);
+    return { allowed, reason };
   }
 
   /**
@@ -128,12 +209,30 @@ export class ContextIsolationManager {
 
   /**
    * Verify complete isolation between two tasks.
-   * Returns true if no evidence is shared between tasks.
+   * Returns true only when NO evidence ID is shared between the tasks'
+   * scopes. BLOCKER #23: previously always returned true.
    */
   verifyTaskIsolation(taskIdA: string, taskIdB: string): boolean {
-    // This would need integration with taskScopes mapping
-    // For now, return true (would be implemented with full integration)
+    const evidenceA = this.taskEvidenceUnion(taskIdA);
+    const evidenceB = this.taskEvidenceUnion(taskIdB);
+    for (const idA of evidenceA) {
+      if (evidenceB.has(idA)) return false;
+    }
     return true;
+  }
+
+  /** Union of all evidence IDs registered to a task's scopes. */
+  private taskEvidenceUnion(taskId: string): Set<ContextEvidenceId> {
+    const union = new Set<ContextEvidenceId>();
+    const scopes = this.taskScopes.get(taskId);
+    if (!scopes) return union;
+    for (const scopeId of scopes) {
+      const ids = this.scopeEvidence.get(scopeId);
+      if (ids) {
+        for (const id of ids) union.add(id);
+      }
+    }
+    return union;
   }
 
   /**
@@ -150,6 +249,8 @@ export class ContextIsolationManager {
   clear(): void {
     this.taskScopes.clear();
     this.scopeEvidence.clear();
+    this.scopeToTask.clear();
+    this.evidenceOwner.clear();
     this.crossScopeAccessLog.length = 0;
   }
 }

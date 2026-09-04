@@ -26,6 +26,19 @@ export class RecoveryContextIntegrator {
   /**
    * Called when recovery begins.
    * Evaluates if context assumptions are still valid.
+   *
+   * FINDING #14 remediation: invalidation at the recovery boundary is
+   * now UNCONDITIONAL. A recovery is inherently a failure of the
+   * execution assumptions that the previous context was built on. The
+   * pre-recovery context is deterministically invalidated:
+   *
+   *   - invalidateContext is true for EVERY recovery
+   *   - heuristic classification only refines `targetKinds` (which
+   *     evidence kinds to re-collect), never becomes the sole reason a
+   *     stale context survives
+   *   - the caller (agent) invalidates the scope, so the old generation
+   *     is guard-denied and a fresh, guard-validated generation is
+   *     required before any further model call
    */
   async onRecoveryStart(input: {
     scope: ContextScope;
@@ -72,37 +85,44 @@ export class RecoveryContextIntegrator {
       };
     }
 
-    // 3. Check if error invalidates execution assumptions
+    // 3. Check if error invalidates execution assumptions.
+    //    Always invalidates (FINDING #14); kinds only refine the refresh.
     if (this.invalidatesExecutionAssumptions(errorMessage)) {
       reasons.push("Error invalidates execution assumptions");
       const execEvidence = evidence.filter(e =>
         e.kind === "code" || e.kind === "placement" || e.kind === "dependency" || e.kind === "observation"
       );
       return {
-        invalidateContext: false, // Don't invalidate, just refresh
+        invalidateContext: true,
+        invalidationReason: "execution-invalidated",
         targetedRefresh: true,
         targetKinds: [...new Set(execEvidence.map(e => e.kind))],
         reasons,
       };
     }
 
-    // 4. Check if failure pattern evidence is now stale
+    // 4. Check if failure pattern evidence is now stale.
+    //    Always invalidates (FINDING #14).
     const failurePatterns = evidence.filter(e => e.kind === "failure-pattern");
     if (failurePatterns.length > 0) {
       reasons.push("Failure pattern evidence may be stale");
       return {
-        invalidateContext: false,
+        invalidateContext: true,
+        invalidationReason: "recovery-invalidated",
         targetedRefresh: true,
         targetKinds: ["failure-pattern", "lesson"],
         reasons,
       };
     }
 
-    // No invalidation needed
+    // No heuristic fired — STILL invalidate (FINDING #14): a recovery
+    // with no recognized matching evidence would otherwise silently keep
+    // the pre-recovery context. Deterministic boundary invalidation.
     return {
-      invalidateContext: false,
-      targetedRefresh: false,
-      reasons: ["No context invalidation required"],
+      invalidateContext: true,
+      invalidationReason: "recovery-invalidated",
+      targetedRefresh: true,
+      reasons: ["Recovery boundary reached — context invalidated deterministically"],
     };
   }
 

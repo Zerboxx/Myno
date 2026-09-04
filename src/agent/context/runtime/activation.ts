@@ -90,6 +90,15 @@ export interface ScopeEvidenceSet {
    * Instruction context = system + project-data only.
    */
   destination: TrustDestination;
+  /**
+   * Deterministic security-evidence policy (BLOCKER #22). The
+   * authoritative pre-freshness expected count; pass on every refresh so
+   * a dropped/stale security-critical item fails closed instead of being
+   * silently re-derived from the shrunken pool.
+   */
+  expectedSecurityCriticalCount?: number;
+  /** True when a security-designated collector failed (fail closed). */
+  securityCollectionFailed?: boolean;
 }
 
 /* ============================================================================
@@ -139,6 +148,30 @@ export class ContextActivationService {
         failure: {
           message: `Context activation failed: scope is ${scope.lifecycleState}`,
           reasons: [`scope-${scope.lifecycleState}`],
+        },
+      };
+    }
+
+    // ---- 0. BLOCKER #23: exact task identity --------------------------------
+    // The scope may be activated ONLY by its owning task. A mismatched
+    // requestId/taskId is a cross-task activation attempt → fail closed.
+    if (scope.taskId !== input.taskId) {
+      lifecycle.failScope(
+        input.scopeId,
+        "Context activation failed: scope belongs to a different task",
+      );
+      lifecycle.recordAuditEvent(
+        input.scopeId,
+        input.taskId,
+        scope.generation,
+        "guard-rejected",
+        { reason: "isolation-task-mismatch" },
+      );
+      return {
+        ok: false,
+        failure: {
+          message: "Context activation failed: scope task does not match request task",
+          reasons: ["isolation-task-mismatch"],
         },
       };
     }
@@ -218,7 +251,38 @@ export class ContextActivationService {
       }),
     };
 
-    // ---- 5. Isolation: record which evidence belongs to this scope. --------
+    // ---- 5. BLOCKER #23: isolation enforcement + evidence binding. --------
+    // Enforced in the EXECUTED path, not LLM-prompted: the task binding and
+    // evidence ownership are checked before assembly. First activation binds
+    // the scope→task and evidence→scope mappings; every later activation
+    // verifies them exactly. Cross-task or cross-scope evidence reuse is DENIED.
+    if (isolation) {
+      const isolationResult = isolation.verifyEvidenceAccess({
+        taskId: input.taskId,
+        scopeId: input.scopeId,
+        evidenceIds: trustedSelectionObj.selected.map(s => s.evidenceId),
+      });
+      if (!isolationResult.allowed) {
+        lifecycle.failScope(
+          input.scopeId,
+          `Context activation failed: ${isolationResult.reasons.join(", ")}`,
+        );
+        lifecycle.recordAuditEvent(
+          input.scopeId,
+          input.taskId,
+          scope.generation,
+          "guard-rejected",
+          { reason: "isolation-denied", details: isolationResult.reasons },
+        );
+        return {
+          ok: false,
+          failure: {
+            message: "Context activation failed: isolation check denied",
+            reasons: isolationResult.reasons,
+          },
+        };
+      }
+    }
     isolation?.registerScope(input.taskId, input.scopeId);
     isolation?.registerEvidence(
       input.scopeId,
@@ -245,8 +309,11 @@ export class ContextActivationService {
         selection: trustedSelectionObj,
         stage: input.stage,
         projectFingerprint: input.projectFingerprint,
+        expectedSecurityCriticalCount: input.expectedSecurityCriticalCount,
+        securityCollectionFailed: input.securityCollectionFailed,
       });
     } catch (error) {
+      lifecycle.clearRuntimeContext(input.scopeId);
       lifecycle.failScope(
         input.scopeId,
         `Context assembly failed during activation: ${String(error)}`,
@@ -276,6 +343,7 @@ export class ContextActivationService {
     const guardResult = guard.validate(runtimeContext);
 
     if (!guardResult.allowed) {
+      lifecycle.clearRuntimeContext(input.scopeId);
       lifecycle.failScope(
         input.scopeId,
         `Context guard rejected new generation: ${guardResult.reasons.join(", ")}`,

@@ -104,6 +104,17 @@ export {
   validateAssembly,
 } from "./guard.js";
 
+// Security-Evidence Policy (BLOCKER #22)
+export {
+  SECURITY_COLLECTOR_IDS,
+  isSecurityCriticalEvidence,
+  countSecurityCriticalEvidence,
+  countInvalidSecurityCriticalEvidence,
+  isSecurityCollectorFailure,
+  computeSecurityEvidenceExpectation,
+  type SecurityEvidenceExpectation,
+} from "./security-evidence-policy.js";
+
 // Recovery
 export {
   RecoveryContextIntegrator,

@@ -103,9 +103,25 @@ export class ContextGuard {
       warnings.push(`Stage mismatch: scope at ${runtimeContext.scope.currentStage}, context for ${runtimeContext.stage}`);
     }
 
-    // 7. Security-critical evidence preserved
-    if (runtimeContext.scope && !this.hasSecurityCriticalEvidence(runtimeContext)) {
-      warnings.push("No security-critical evidence in context");
+    // 7. Security-critical evidence required (BLOCKER #22 — FAIL CLOSED).
+    //    When lifecycle assembly marked the context security-required but no
+    //    valid security-critical evidence is present, the context is DENIED:
+    //    a security-required context without security evidence never reaches
+    //    the model. Contexts assembled without the policy fields (legacy
+    //    hand-built fixtures) keep the old marker-based warning only.
+    if (runtimeContext.scope) {
+      if (
+        runtimeContext.securityEvidenceRequired === true &&
+        !runtimeContext.securityEvidencePresent
+      ) {
+        allowed = false;
+        reasons.push("Security-critical evidence required but absent from context");
+      } else if (
+        runtimeContext.securityEvidenceRequired === undefined &&
+        !this.hasSecurityCriticalEvidence(runtimeContext)
+      ) {
+        warnings.push("No security-critical evidence in context");
+      }
     }
 
     // 8. Evidence IDs match scope

@@ -25,6 +25,7 @@ import { createSnapshot } from "../snapshot.js";
 import { assembleContext, renderContextPackage } from "../assembly.js";
 import { createReferences } from "../progressive-disclosure.js";
 import { ContextMetricsCollector } from "./observability.js";
+import { countSecurityCriticalEvidence } from "./security-evidence-policy.js";
 
 /* ============================================================================
  * LIFECYCLE MANAGER
@@ -202,14 +203,48 @@ export class ContextLifecycleManager {
     selection: ContextSelectionResult;
     stage: ContextSelectionStage;
     projectFingerprint?: string;
+    /**
+     * Deterministic security-evidence policy (BLOCKER #22). When absent,
+     * expectedSecurityCriticalCount is derived from the collection passed
+     * here. Callers that refresh MUST pass the authoritative pre-freshness
+     * count so a dropped/stale security-critical item still fails closed.
+     */
+    expectedSecurityCriticalCount?: number;
+    /**
+     * True when a security-designated collector failed. Permanently marks
+     * the assembled context security-required (fail closed).
+     */
+    securityCollectionFailed?: boolean;
   }): Promise<RuntimeContext> {
     const scope = this.scopes.get(input.scopeId);
     if (!scope) throw new Error(`Scope not found: ${input.scopeId}`);
+
+    // BLOCKER #23: exact task identity — a scope may only assemble a
+    // collection produced by ITS task. Enforced at the single assembly
+    // point, regardless of which caller reached it.
+    if (scope.taskId !== input.collection.metadata.taskId) {
+      throw new Error(
+        `Context isolation violation: scope task "${scope.taskId}" does not match collection task "${input.collection.metadata.taskId}"`,
+      );
+    }
 
     // Explicit state machine step: INVALIDATED/REFRESHING -> VALIDATING.
     // The scope only becomes ACTIVE through completeRefresh() AFTER the
     // ContextGuard validates the freshly assembled runtime context.
     scope.lifecycleState = "validating";
+
+    const collectedEvidence = input.collection.evidence as unknown as ContextEvidence[];
+    const expectedSecurityCriticalCount =
+      input.expectedSecurityCriticalCount ??
+      countSecurityCriticalEvidence(collectedEvidence);
+    const securityCollectionFailed = input.securityCollectionFailed ?? false;
+    const securityEvidenceRequired =
+      expectedSecurityCriticalCount > 0 || securityCollectionFailed;
+    const selectedEvidence = input.selection.selected
+      .map(s => collectedEvidence.find(e => e.id === s.evidenceId))
+      .filter((e): e is ContextEvidence => e !== undefined);
+    const securityEvidencePresent =
+      countSecurityCriticalEvidence(selectedEvidence) > 0;
 
     // Create snapshot
     const snapshot = createSnapshot({
@@ -221,7 +256,7 @@ export class ContextLifecycleManager {
         createdAt: Date.now(),
         evidenceCount: input.collection.metadata.estimatedTokens,
         estimatedTokens: input.collection.metadata.estimatedTokens,
-        securityCriticalCount: 0,
+        securityCriticalCount: expectedSecurityCriticalCount,
         sourceTypeCounts: {} as any,
         kindCounts: {} as any,
         schemaVersion: 1,
@@ -264,10 +299,17 @@ export class ContextLifecycleManager {
       assemblyHash,
       assembly: assemblyString,
       evidenceIds: Object.freeze([...input.selection.selected.map(s => s.evidenceId)]),
+      securityEvidenceRequired,
+      securityEvidencePresent,
+      securityEvidenceExpectedCount: expectedSecurityCriticalCount,
       createdAt: Date.now(),
       frozenAt: Date.now(),
       status: "active",
     };
+
+    scope.securityEvidenceRequired = securityEvidenceRequired;
+    scope.securityEvidencePresent = securityEvidencePresent;
+    scope.securityEvidenceExpectedCount = expectedSecurityCriticalCount;
 
     scope.lifecycleState = "validating";
     scope.snapshotId = snapshot.metadata.taskId;
@@ -299,6 +341,15 @@ export class ContextLifecycleManager {
    */
   getRuntimeContext(scopeId: ContextScopeId): RuntimeContext | undefined {
     return this.runtimeContexts.get(scopeId);
+  }
+
+  /**
+   * Remove the stored runtime context for a scope.
+   * Used so a failed refresh attempt leaves no generation that could be
+   * mistaken for the current contextual state.
+   */
+  clearRuntimeContext(scopeId: ContextScopeId): void {
+    this.runtimeContexts.delete(scopeId);
   }
 
   /* ============================================================================

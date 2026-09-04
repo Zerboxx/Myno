@@ -94,6 +94,9 @@ function makeRuntimeContext(
     createdAt: Date.now(),
     frozenAt: Date.now(),
     status: "active",
+    securityEvidenceRequired: false,
+    securityEvidencePresent: true,
+    securityEvidenceExpectedCount: 0,
     ...overrides,
   };
 }

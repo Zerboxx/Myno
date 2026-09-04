@@ -21,6 +21,11 @@ import { ALL_COLLECTORS } from "./collectors/collectors.js";
 import { evaluateFreshness } from "./freshness.js";
 import { computePriority, assignPriority } from "./prioritization.js";
 import { createSnapshot, type ContextSnapshot } from "./snapshot.js";
+import {
+  countInvalidSecurityCriticalEvidence,
+  countSecurityCriticalEvidence,
+  isSecurityCollectorFailure,
+} from "./runtime/security-evidence-policy.js";
 
 /* ============================================================================
  * PIPELINE TYPES
@@ -46,6 +51,17 @@ export interface PipelineMetrics {
   freshnessDurationMs: number;
   prioritizationDurationMs: number;
   totalDurationMs: number;
+  /**
+   * Deterministic security-evidence policy (BLOCKER #22). Expected =
+   * count of VALID security-critical evidence in the pipelined
+   * collection + invalid security-critical items rejected during
+   * validation. securityCollectionFailed = any security-designated
+   * collector failed. These drive the fail-closed activation gate —
+   * derived from actual pipeline outcome, never from heuristics.
+   */
+  expectedSecurityCriticalCount?: number;
+  invalidSecurityCriticalCount?: number;
+  securityCollectionFailed?: boolean;
 }
 
 /* ============================================================================
@@ -149,6 +165,11 @@ export async function executePipeline(
     freshnessDurationMs: freshnessDuration,
     prioritizationDurationMs: prioritizationDuration,
     totalDurationMs: totalDuration,
+    expectedSecurityCriticalCount: countSecurityCriticalEvidence(collection.evidence),
+    invalidSecurityCriticalCount: countInvalidSecurityCriticalEvidence(invalidEvidence),
+    securityCollectionFailed: collectorResults.some(
+      r => !r.success && isSecurityCollectorFailure(r.collectorId),
+    ),
   };
 
   return { collection, snapshot, metrics };

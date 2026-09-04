@@ -644,6 +644,15 @@ export interface ContextScope {
 
   /** Invalidation reason if invalidated */
   invalidationReason?: ContextInvalidationReason;
+
+  /** True when this scope requires valid security-critical evidence (deterministic). */
+  securityEvidenceRequired?: boolean;
+
+  /** True when valid security-critical evidence is present in the current assembly. */
+  securityEvidencePresent?: boolean;
+
+  /** Expected number of valid security-critical items for this scope. */
+  securityEvidenceExpectedCount?: number;
 }
 
 /** Canonical runtime context object */
@@ -677,6 +686,15 @@ export interface RuntimeContext {
 
   /** Current status */
   status: "active" | "superseded" | "invalidated" | "completed";
+
+  /** True when this context requires valid security-critical evidence. */
+  securityEvidenceRequired: boolean;
+
+  /** True when valid security-critical evidence reached this context. */
+  securityEvidencePresent: boolean;
+
+  /** Expected number of valid security-critical items (deterministic). */
+  securityEvidenceExpectedCount: number;
 
   /** Invalidation reason if applicable */
   invalidationReason?: ContextInvalidationReason;

@@ -580,6 +580,28 @@ interface AgentState {
    * P3.6-D: Context lifecycle observability collector.
    */
   contextMetrics?: ContextMetricsCollector;
+
+  /**
+   * P3.6-REMEDIATION (BLOCKER #22): deterministic security-evidence
+   * policy captured from the context pipeline. Recorded regardless of
+   * whether pipeline/selection/assembly throws (the gates at
+   * ensureActiveContext consume this, so a swallowed error cannot let a
+   * security-required context reach the model). Once set, it is NOT
+   * cleared on error paths — a security collector failure stays failed.
+   */
+  contextSecurity?: ContextSecurityState;
+}
+
+/**
+ * Deterministic security-evidence policy state (BLOCKER #22).
+ */
+interface ContextSecurityState {
+  /** True when a security-designated collector failed. */
+  securityCollectionFailed: boolean;
+  /** Expected valid security-critical evidence from the pipeline. */
+  expectedSecurityCriticalCount: number;
+  /** Security-critical items rejected during validation. */
+  invalidSecurityCriticalCount: number;
 }
 
 /* ============================================================================
@@ -821,6 +843,19 @@ export class Agent {
           state.contextCollection = pipelineResult.collection;
           state.contextSnapshot = pipelineResult.snapshot;
 
+          // BLOCKER #22: capture the deterministic security policy BEFORE
+          // any later try/catch. If a security-designated collector failed,
+          // that fact is recorded here and consumed by every activation
+          // gate — it is never silently swallowed.
+          state.contextSecurity = {
+            securityCollectionFailed:
+              pipelineResult.metrics.securityCollectionFailed === true,
+            expectedSecurityCriticalCount:
+              pipelineResult.metrics.expectedSecurityCriticalCount ?? 0,
+            invalidSecurityCriticalCount:
+              pipelineResult.metrics.invalidSecurityCriticalCount ?? 0,
+          };
+
           // P3.6-C: Context Selection & Assembly
           try {
             const contextBudget = getContextBudget(taskDesc);
@@ -882,6 +917,14 @@ export class Agent {
               selection: trustedSelectionObj,
               stage,
               projectFingerprint: state.contextScope!.projectId,
+              // BLOCKER #22: the authoritative pre-freshness security
+              // expectation travels with the assembly. A dropped or stale
+              // security-critical item therefore fails closed instead of
+              // being silently re-derived from the shrunken pool.
+              expectedSecurityCriticalCount:
+                state.contextSecurity?.expectedSecurityCriticalCount,
+              securityCollectionFailed:
+                state.contextSecurity?.securityCollectionFailed,
             });
 
             state.runtimeContext = runtimeContext;
@@ -914,10 +957,21 @@ export class Agent {
               };
             }
           } catch (_selectionErr) {
-            // Selection/assembly failure must not block execution
+            // Selection/assembly failure must not block execution.
+            // BLOCKER #22: the security expectation captured from the
+            // pipeline is preserved; ensureActiveContext will fail closed
+            // if this task is security-required and no valid context exists.
           }
         } catch (_pipelineErr) {
-          // Context pipeline failure must not block execution
+          // Context pipeline failure must not block execution.
+          // BLOCKER #22: record the collection failure deterministically.
+          // A later activation gate marks this task security-required and
+          // blocks the model until valid security evidence is available.
+          state.contextSecurity = {
+            securityCollectionFailed: true,
+            expectedSecurityCriticalCount: 0,
+            invalidSecurityCriticalCount: 0,
+          };
         }
       } catch (_err) {
         // Intelligence failure must not block execution
@@ -2303,8 +2357,24 @@ private createInitialPlan(
       contextCollection,
     } = state;
 
-    // No lifecycle assets → nothing to guard.
+    // No lifecycle assets → normally nothing to guard. BUT (BLOCKER #22)
+    // if a context flow was actually required — a collection exists, a
+    // security-designated collector failed, or security evidence was
+    // expected — the absence of lifecycle assets is a FAILED activation.
+    // Returns true ONLY when there is genuinely no context to guard.
     if (!contextLifecycle || !contextScope) {
+      if (
+        contextCollection !== undefined ||
+        state.contextSecurity?.securityCollectionFailed === true ||
+        (state.contextSecurity?.expectedSecurityCriticalCount ?? 0) > 0
+      ) {
+        this.fail(
+          state,
+          "Context security guard: lifecycle assets missing while a context flow is required.",
+          false,
+        );
+        return false;
+      }
       return true;
     }
 
@@ -2411,6 +2481,13 @@ private createInitialPlan(
         refreshReason:
           "activation-refresh",
         destination: "instruction",
+        // BLOCKER #22: the authoritative stored security policy stays with
+        // the activation so a dropped/stale security-critical item or a
+        // past security collector failure still fails closed on refresh.
+        expectedSecurityCriticalCount:
+          state.contextSecurity?.expectedSecurityCriticalCount,
+        securityCollectionFailed:
+          state.contextSecurity?.securityCollectionFailed,
       });
 
     if (!result.ok) {

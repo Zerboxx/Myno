@@ -2,7 +2,11 @@
  * P3.6-C — Progressive Disclosure
  *
  * Manages deferred evidence references.
- * No fake retrieval tools — honestly represents availability.
+ * BLOCKER #24 remediation (Option B): no fake retrieval tools. There is
+ * NO evidence-retrieval tool in this project, so deferred
+ * evidence is honestly represented as NOT currently exposed to the model.
+ * Re-including deferred evidence requires a fresh context collection /
+ * refresh — nothing is retrievable by tool call or follow-up.
  */
 
 import type {
@@ -20,38 +24,21 @@ export interface DeferralInput {
   reason: "budget-exceeded" | "low-priority" | "stage-inappropriate" | "reference-only";
   stage: ContextSelectionStage;
   availableNow: boolean;
-  retrievalMechanism: "none" | "tool" | "follow-up" | "internal";
+  retrievalMechanism: "none";
 }
 
 /**
  * Create a deferred reference for evidence that couldn't be included.
- * No fake retrieval — honestly represents availability.
+ * No fake retrieval — honestly represents availability as not exposed.
  */
 export function createReference(input: DeferralInput): ContextReference {
-  const { evidence, reason, stage, availableNow, retrievalMechanism } = input;
+  const { evidence, reason, stage, availableNow } = input;
 
-  let availability: ContextReference["availability"];
-  let retrievalHint: string;
-
-  switch (retrievalMechanism) {
-    case "tool":
-      availability = "deferred-but-retrievable";
-      retrievalHint = `Use 'get_context_evidence' tool with evidenceId: ${evidence.id}`;
-      break;
-    case "follow-up":
-      availability = "deferred-but-retrievable";
-      retrievalHint = `Request in follow-up: "Show me ${evidence.kind} evidence for ${evidence.source.sourceName}"`;
-      break;
-    case "internal":
-      availability = "available-now";
-      retrievalHint = "Already in context pipeline — accessible via internal query";
-      break;
-    case "none":
-    default:
-      availability = "deferred-not-currently-exposed";
-      retrievalHint = "Not currently retrievable — would require re-running context collection";
-      break;
-  }
+  const availability: ContextReference["availability"] =
+    "deferred-not-currently-exposed";
+  const retrievalHint = availableNow
+    ? "Present in the runtime pipeline but not exposed to the model in this context."
+    : "Not currently loaded into the model context — re-running context collection would be required to include it.";
 
   // Generate summary based on evidence content
   let summary: string;
@@ -97,23 +84,17 @@ export function createReferences(
       };
     }
 
-    // Determine deferral reason and retrieval mechanism
+    // Determine deferral reason and retrieval mechanism.
+    // BLOCKER #24 (Option B): every deferred reference is honestly
+    // not-currently-exposed. No retrieval mechanism is ever advertised.
     let reason: DeferralInput["reason"] = "budget-exceeded";
     let retrievalMechanism: DeferralInput["retrievalMechanism"] = "none";
     let availableNow = false;
 
-    if (ev.securityClassification === "security-critical") {
+    if (ev.criticality === "critical" || ev.kind === "lesson" || ev.kind === "knowledge") {
       reason = "budget-exceeded";
-      retrievalMechanism = "tool";
-    } else if (ev.criticality === "critical") {
-      reason = "budget-exceeded";
-      retrievalMechanism = "follow-up";
-    } else if (ev.kind === "lesson" || ev.kind === "knowledge") {
-      reason = "low-priority";
-      retrievalMechanism = "internal";
     } else if (stage === "planning" && (ev.kind === "observation" || ev.kind === "verification")) {
       reason = "stage-inappropriate";
-      retrievalMechanism = "follow-up";
     }
 
     return createReference({
