@@ -791,3 +791,102 @@ When evidence is missing, say so.
 When a design is unsafe, say so.
 When a capability is unavailable, say so.
 When a gate is not passed, do not pretend it is.
+
+
+---
+
+## 40. Canonical Memory Preservation Protocol — Mandatory
+
+`MYNO_PROJECT_MEMORY.md` is not a disposable summary. It is long-term engineering memory.
+
+When editing either canonical document, use:
+
+`PRESERVE → CLASSIFY → MERGE → REMOVE ONLY TRUE DUPLICATION → ADD → VERIFY SEMANTIC COVERAGE`
+
+Do not:
+
+- shorten away architectural decisions;
+- delete future milestones because they are not active yet;
+- replace explicit invariants with vague prose;
+- silently rewrite historical rationale;
+- remove capability detail merely to make documentation look cleaner.
+
+No substantive canonical requirement may be deleted without explicit justification identifying what supersedes it and why.
+
+---
+
+## 41. Mandatory Semantic Coverage Audit
+
+Before a substantial rewrite of `MYNO_PROJECT_MEMORY.md` or `AGENTS.md`:
+
+1. identify the previous canonical version;
+2. classify substantive requirements;
+3. compare semantic coverage, not only wording;
+4. preserve all still-valid invariants and roadmap intent;
+5. merge true duplicates only;
+6. explicitly mark superseded decisions;
+7. verify the resulting document still covers vision, architecture, P3.6-S, LEI, security, roadmap, production/Beta, economics, and operating rules.
+
+A shorter document is not automatically an improvement.
+
+---
+
+## 42. Decision Ledger Discipline
+
+For major architectural decisions, preserve enough information to answer:
+
+- What was decided?
+- What problem/context existed?
+- What alternatives existed?
+- Why was this option chosen?
+- What invariant follows?
+- What implementation details remain replaceable?
+- What migration consequences exist?
+- What evidence supports it?
+- When should the decision be revisited?
+
+Never preserve only the final answer while losing the engineering rationale.
+
+---
+
+## 43. Roadmap Gate Discipline
+
+Future design work may inform current architecture, but it does not activate future phases.
+
+Use explicit states such as:
+
+`PLANNED → DESIGNED → IN PROGRESS → IMPLEMENTED → VERIFIED → CERTIFIED`
+
+and when appropriate:
+
+`BLOCKED / DEPRECATED / SUPERSEDED`.
+
+Do not skip P3.6-S intelligence work to chase Beta, cloud, product, or UI work prematurely. Do not claim P3.6-CERTIFIED from subsystem-local green tests.
+
+---
+
+## 44. Restoration Principle for This Repository
+
+Historical project intent and newer future-proofing requirements are additive unless a documented decision explicitly supersedes an earlier requirement.
+
+When in doubt:
+
+1. preserve the detail;
+2. mark uncertainty;
+3. ask whether two requirements are genuinely contradictory;
+4. merge them without information loss where possible.
+
+Never resolve uncertainty by silently deleting one side.
+
+---
+
+## 45. Final Operating Standard
+
+Act as a long-horizon engineer, not a short-horizon text editor.
+
+Protect the project from two forms of failure:
+
+1. bad implementation; and
+2. loss of architectural intent over time.
+
+The repository should become easier to evolve without becoming easier to misunderstand.
