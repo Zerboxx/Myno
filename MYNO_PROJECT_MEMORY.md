@@ -24,34 +24,9 @@ The long-term promise is bounded by real capabilities and evidence. "Universal" 
 
 # 2. ULTIMATE USER EXPERIENCE
 
-A user should eventually be able to describe a technically executable Roblox goal in natural language, for example:
+A user should eventually be able to describe a technically executable Roblox goal in natural language.
 
-> Build a complete delivery system with quests, NPCs, UI, persistent progression, multiplayer-safe remotes, effects, sounds, optimized delivery zones, onboarding, progression, and live-ready validation.
-
-MYNO should be able to:
-
-1. understand intent
-2. extract requirements and constraints
-3. inspect the existing project
-4. understand the existing architecture
-5. build/update an Architecture Graph
-6. decompose the goal into artifacts and systems
-7. determine ownership, runtime, placement, dependencies, and communication
-8. create a mutation plan
-9. enforce policy and authorization
-10. implement changes
-11. build/modify assets and environment when required
-12. test
-13. observe real runtime behavior
-14. verify semantic correctness
-15. diagnose failures
-16. repair failures
-17. re-test and check regressions
-18. review architecture and experience quality
-19. refactor where necessary
-20. preserve project integrity
-21. report exactly what happened with evidence
-22. persist useful project memory
+MYNO should be able to understand intent, extract requirements and constraints, inspect the existing project, understand architecture, build an Architecture Graph, decompose the goal, determine ownership/placement/dependencies, create a mutation plan, enforce policy, implement, test, observe runtime behavior, verify semantic correctness, diagnose and repair failures, re-test, review architecture and experience quality, preserve project integrity, report evidence, and persist useful project memory.
 
 The user should not need to know which script belongs where. MYNO should understand that.
 
@@ -63,22 +38,7 @@ The user should not need to know which script belongs where. MYNO should underst
 
 The model may reason, plan, explain, and propose.
 
-Deterministic systems control:
-
-- authorization
-- placement
-- mutation scope
-- Studio identity
-- tenant identity
-- security policy
-- budgets
-- tool access
-- destructive operations
-- verification
-- rollback/recovery
-- lifecycle
-- resource consumption
-- payment/credit entitlements
+Deterministic systems control authorization, placement, mutation scope, Studio identity, tenant identity, security policy, budgets, tool access, destructive operations, verification, rollback/recovery, lifecycle, and resource consumption.
 
 The model is never the final security authority.
 
@@ -136,22 +96,13 @@ A plan is not execution. Execution is not verification. Verification is not cert
 
 # 5. ENGINEERING STATES
 
-Keep these states permanently distinct:
+Keep these states distinct:
 
 `Designed ≠ Implemented ≠ Verified ≠ Certified`
 
 Evidence must identify what state is actually supported.
 
-A green test suite alone is not certification.
-
-Never claim:
-
-- full security without full evidence
-- rollback without a tested restoration path
-- authorization when only policy scaffolding exists
-- runtime correctness from static inspection alone
-- capability that was not actually available
-- certification before the gate passes
+Never claim full security, rollback, authorization, runtime correctness, capability, or certification without evidence.
 
 ---
 
@@ -200,29 +151,11 @@ No provider-specific logic should leak deeply into the agent architecture.
 
 **Everything we build today is allowed to evolve tomorrow.**
 
-This is a permanent architectural rule.
-
-Do not treat today's:
-
-- provider
-- model
-- Roblox API
-- Studio MCP schema
-- tool capability
-- database
-- payment provider
-- pricing model
-- UI
-- storage format
-- artifact representation
-- game design
-- deployment topology
-
-as permanent.
+Do not treat today's provider, model, Roblox API, Studio MCP schema, tool capability, database, payment provider, pricing model, UI, storage format, artifact representation, game design, or deployment topology as permanent.
 
 Prefer stable interfaces, capability discovery, adapters, versioned contracts, migrations, deprecation paths, compatibility layers, feature flags, and replaceable components.
 
-For every important architectural decision, explicitly distinguish:
+For every important architectural decision, distinguish:
 
 1. stable invariant
 2. replaceable implementation
@@ -243,17 +176,11 @@ Roblox Studio identity is explicit.
 
 There must be no global active-Studio assumption.
 
-Production must similarly model tenant/customer/session identity explicitly.
-
-Cross-Studio and cross-tenant access must fail closed and be auditable.
-
-No global mutable authorization context.
+Production must model tenant/customer/session identity explicitly. Cross-Studio and cross-tenant access must fail closed and be auditable.
 
 ---
 
 # 9. P3.6-S — UNIVERSAL ROBLOX INTELLIGENCE
-
-P3.6-S is the intelligence foundation.
 
 Canonical subsystems:
 
@@ -291,9 +218,7 @@ P3.6-S is not a checklist of disconnected features. Each subsystem integrates wi
 
 # 10. S.1 — ARTIFACT INTELLIGENCE
 
-MYNO must understand Roblox artifacts semantically, not merely by class name.
-
-Examples include Script, LocalScript, ModuleScript, RemoteEvent, RemoteFunction, BindableEvent, BindableFunction, Folder, Model, Part, MeshPart, Attachment, BillboardGui, ScreenGui, SurfaceGui, UI objects, Animation, Sound, ParticleEmitter, Beam, Trail, Terrain, Lighting objects, NPC structures, configuration objects, data systems, and future Roblox artifact types.
+Understand Roblox artifacts semantically, not merely by class name. This includes scripts, remotes, bindables, folders, models, parts, meshes, attachments, UI, animation, sound, VFX, terrain, lighting, NPC structures, configuration, data systems, and future artifact types.
 
 Artifact understanding includes purpose, owner, runtime, lifecycle, placement, dependencies, security, and verification criteria.
 
@@ -303,24 +228,7 @@ Artifact understanding includes purpose, owner, runtime, lifecycle, placement, d
 
 The Architecture Graph is the backbone of project understanding.
 
-It represents:
-
-- artifacts
-- systems
-- ownership
-- runtime side
-- placement
-- dependencies
-- communication
-- persistence
-- security boundaries
-- lifecycle
-- responsibilities
-- contracts
-- versions
-- migrations
-- feature flags
-- evidence
+It represents artifacts, systems, ownership, runtime side, placement, dependencies, communication, persistence, security boundaries, lifecycle, responsibilities, contracts, versions, migrations, feature flags, and evidence.
 
 Before high-impact mutations, MYNO should perform change-impact analysis over the graph.
 
@@ -332,28 +240,15 @@ Placement is determined by semantic role, runtime ownership, replication, lifecy
 
 Typical locations include ServerScriptService, ServerStorage, ReplicatedStorage, StarterPlayerScripts, StarterCharacterScripts, StarterGui, Workspace, Lighting, SoundService, Terrain, and other current/future Roblox containers.
 
-MYNO must not blindly use a remembered location when current Roblox behavior or project architecture requires something else.
+Do not blindly use remembered locations when current Roblox behavior or project architecture requires something else.
 
 ---
 
 # 13. S.4 — DEPENDENCY / COMMUNICATION
 
-MYNO must understand:
+Understand require relationships, RemoteEvents/RemoteFunctions, Bindables/signals, listeners, shared/replicated state, service/data/runtime dependencies, serialization boundaries, Actor/cross-thread communication, and network ownership.
 
-- require relationships
-- RemoteEvents / RemoteFunctions
-- Bindables and signals
-- event listeners
-- shared state
-- replicated state
-- service dependencies
-- data dependencies
-- runtime dependencies
-- serialization boundaries
-- Actor/cross-thread communication
-- network ownership
-
-It should detect broken dependency direction, cycles, missing contracts, unsafe communication, and lifecycle hazards before runtime where possible.
+Detect broken dependency direction, cycles, missing contracts, unsafe communication, and lifecycle hazards before runtime where possible.
 
 ---
 
@@ -361,21 +256,7 @@ It should detect broken dependency direction, cycles, missing contracts, unsafe 
 
 Mutations are structured plans, not blind edits.
 
-A mutation plan should capture, as applicable:
-
-- target
-- operation
-- owner
-- scope
-- preconditions
-- dependencies
-- expected result
-- risk
-- policy requirements
-- verification requirements
-- rollback/compensation
-- idempotency strategy
-- concurrency/version expectations
+A mutation plan should capture target, operation, owner, scope, preconditions, dependencies, expected result, risk, policy requirements, verification requirements, rollback/compensation, idempotency, and concurrency/version expectations.
 
 ---
 
@@ -383,23 +264,7 @@ A mutation plan should capture, as applicable:
 
 Verification must go beyond "Instance exists".
 
-Verify when applicable:
-
-- correct artifact
-- correct class
-- correct location
-- correct source
-- correct ownership
-- correct runtime
-- correct dependencies
-- correct communication
-- correct lifecycle
-- correct security boundary
-- correct semantic behavior
-- correct runtime behavior
-- correct architecture
-- correct performance/resource behavior
-- correct player-facing result
+Verify when applicable artifact, class, location, source, ownership, runtime, dependencies, communication, lifecycle, security boundary, semantic behavior, runtime behavior, architecture, performance/resource behavior, and player-facing result.
 
 Observations must be freshness-aware and scoped to a known project/Studio/version context.
 
@@ -407,26 +272,7 @@ Observations must be freshness-aware and scoped to a known project/Studio/versio
 
 # 16. S.7 — SYSTEMS ENGINEERING
 
-MYNO must understand complete Roblox systems such as:
-
-- quests
-- inventory
-- economy
-- shops
-- progression
-- combat
-- spawning
-- matchmaking
-- missions
-- delivery systems
-- jobs
-- rewards
-- achievements
-- player profiles
-- admin systems
-- social systems
-- analytics/telemetry
-- live events
+Understand complete systems such as quests, inventory, economy, shops, progression, combat, spawning, matchmaking, missions, delivery systems, jobs, rewards, achievements, player profiles, admin systems, social systems, analytics, telemetry, and live events.
 
 The target is system engineering, not isolated scripts.
 
@@ -434,20 +280,7 @@ The target is system engineering, not isolated scripts.
 
 # 17. S.8 — ENVIRONMENT / TERRAIN
 
-MYNO should understand and manipulate:
-
-- terrain
-- biomes
-- roads
-- zones
-- buildings
-- world layout
-- lighting
-- atmosphere
-- landmarks
-- navigation spaces
-- gameplay areas
-- streaming-aware spatial design
+Understand terrain, biomes, roads, zones, buildings, world layout, lighting, atmosphere, landmarks, navigation spaces, gameplay areas, and streaming-aware spatial design.
 
 ---
 
@@ -461,26 +294,9 @@ Prefer reusable content primitives over uncontrolled duplication.
 
 # 19. S.10 — VISUAL INTELLIGENCE
 
-Reason about:
+Reason about composition, visual hierarchy, readability, contrast, color harmony, lighting, materials, scale consistency, prop density, landmarks, focal points, repetition/dead space, player guidance, and environmental storytelling.
 
-- composition
-- visual hierarchy
-- readability
-- contrast
-- color harmony
-- lighting
-- materials
-- scale consistency
-- prop density
-- landmarks
-- focal points
-- repetition/dead space
-- player guidance
-- environmental storytelling
-
-Use evidence loops such as:
-
-`BUILD → CAPTURE → CRITIQUE → REPAIR → RE-CAPTURE → COMPARE → POLISH`
+Use evidence loops such as `BUILD → CAPTURE → CRITIQUE → REPAIR → RE-CAPTURE → COMPARE → POLISH`.
 
 ---
 
@@ -490,7 +306,7 @@ Core loop:
 
 `INPUT → STATE → ACTION → FEEDBACK → REWARD → PROGRESSION`
 
-MYNO should construct and verify interaction systems and their player experience, not just their code.
+Construct and verify interaction systems and their player experience, not just their code.
 
 ---
 
@@ -524,20 +340,7 @@ Never test destructive persistence behavior against live production data.
 
 # 25. S.16 — MULTIPLAYER / REPLICATION
 
-Understand:
-
-- server authority
-- client authority boundaries
-- replication
-- remotes
-- validation
-- rate limits
-- race conditions
-- network ownership
-- serialization
-- replication cost
-- streaming implications
-- cross-server state
+Understand server authority, client authority boundaries, replication, remotes, validation, rate limits, race conditions, network ownership, serialization, replication cost, streaming implications, and cross-server state.
 
 Client-originated state changes must be server validated.
 
@@ -581,30 +384,7 @@ Maintain naming, folder organization, unused artifact detection, duplicate detec
 
 Security is architectural.
 
-Important areas include:
-
-- client/server trust boundaries
-- remote validation
-- authorization
-- prompt injection
-- indirect injection
-- malicious project content
-- malicious tool output
-- tool abuse
-- malicious arguments
-- path traversal
-- Studio isolation
-- tenant isolation
-- privilege boundaries
-- secret leakage
-- context poisoning
-- memory poisoning
-- model manipulation
-- resource exhaustion
-- destructive mutations
-- verification bypass
-- stale-state exploitation
-- provider failure abuse
+Important areas include client/server trust boundaries, remote validation, authorization, prompt injection, indirect injection, malicious project content, malicious tool output, tool abuse, malicious arguments, path traversal, Studio isolation, tenant isolation, privilege boundaries, secret leakage, context poisoning, memory poisoning, model manipulation, resource exhaustion, destructive mutations, verification bypass, stale-state exploitation, and provider failure abuse.
 
 Security policy must be deterministic and auditable.
 
@@ -612,17 +392,7 @@ Security policy must be deterministic and auditable.
 
 # 31. S.22 — DESIGN SYSTEMS
 
-MYNO should learn and preserve project style:
-
-- colors
-- typography
-- spacing
-- UI patterns
-- naming
-- visual language
-- interaction conventions
-- world-building conventions
-- asset conventions
+MYNO should learn and preserve project style: colors, typography, spacing, UI patterns, naming, visual language, interaction conventions, world-building conventions, and asset conventions.
 
 Design systems must be versionable and evolvable.
 
@@ -630,21 +400,7 @@ Design systems must be versionable and evolvable.
 
 # 32. S.23 — PROJECT MEMORY / DESIGN INTENT
 
-MYNO should remember:
-
-- architecture decisions
-- design decisions
-- conventions
-- project goals
-- constraints
-- previous failures
-- successful patterns
-- intentional exceptions
-- user preferences relevant to the project
-- compatibility assumptions
-- migrations
-- deprecations
-- evidence
+Remember architecture decisions, design decisions, conventions, goals, constraints, previous failures, successful patterns, intentional exceptions, compatibility assumptions, migrations, deprecations, and evidence.
 
 Memory must be provenance-aware and must not become an unquestioned source of truth. Memory can become stale or poisoned and must be validated against current project/runtime evidence.
 
@@ -652,74 +408,40 @@ Memory must be provenance-aware and must not become an unquestioned source of tr
 
 # 33. S.24 — NOVEL / UNKNOWN PROBLEM SOLVER
 
-MYNO must be able to recognize when a problem is outside known patterns.
-
-The intended strategy is:
+Strategy:
 
 `DETECT NOVELTY → DECOMPOSE → SEARCH/RETRIEVE → HYPOTHESIZE → BUILD SMALL EXPERIMENT → OBSERVE → VALIDATE → UPDATE KNOWLEDGE → IMPLEMENT → VERIFY`
 
-Unknown behavior must not be filled with confident invention.
-
-Novel solutions must remain bounded by deterministic policy and evidence.
+Unknown behavior must not be filled with confident invention. Novel solutions remain bounded by deterministic policy and evidence.
 
 ---
 
 # 34. S.25 — GOLDEN ARCHITECTURE / SELF-REVIEW
 
-Before declaring meaningful work complete, MYNO should review:
-
-- architecture fit
-- dependency direction
-- security boundaries
-- placement
-- runtime correctness
-- persistence correctness
-- performance
-- maintainability
-- future extensibility
-- player experience
-- project consistency
-- test/evidence coverage
+Before declaring meaningful work complete, review architecture fit, dependency direction, security, placement, runtime correctness, persistence, performance, maintainability, extensibility, player experience, project consistency, and evidence coverage.
 
 The final question is not "does the code run?" but "does the implementation belong in the project and survive its intended lifecycle?"
 
 ---
 
-# 35. LEI — LUau / ROBLOX ENGINEERING INTELLIGENCE
+# 35. LEI — LUAU / ROBLOX ENGINEERING INTELLIGENCE
 
 LEI is cross-cutting P3.6-S capability.
 
-It covers:
+Coverage:
 
-### Luau semantics
-Syntax, scope, closures, tables, metatables/metamethods, coroutines, iterators, functions, modules, error handling, runtime behavior, coercion, evaluation order, lifecycle behavior.
-
-### Type mastery
-`--!strict`, inference, annotations, unions, intersections, generics, function/table types, narrowing, casts, structural typing, exported types, evolving type-solver behavior.
-
-### Roblox mastery
-Services, Instances, DataModel, Script/LocalScript/ModuleScript, lifecycle, signals, Player/Character lifecycle, UI, physics, animation, DataStore/MemoryStore/configuration/secrets, networking, replication, streaming, Actors, parallel execution, current engine APIs.
-
-### Client/server
-Authority, remotes, validation, replication, prediction where appropriate, exploit-resistant design.
-
-### Performance
-Allocations, tables, loops, event frequency, GC, RunService, parallel Luau, Actors, native-code paths, profiling.
-
-### Debugging
-Syntax, type, runtime, logical, lifecycle, replication, state, memory, performance, and integration failures.
-
-### Architecture
-Coupling, cohesion, module boundaries, dependency direction, API design, extensibility, maintainability, scalability.
-
-### Security
-Client trust, remote validation, authorization, server authority, exploit surfaces.
-
-### Refactoring
-Safe refactor, API preservation, dependency migration, dead code, architecture migration, regression prevention.
-
-### Code review
-Classify syntax/type/runtime/architecture/performance/security/maintainability problems.
+- Luau syntax and semantics
+- scope, closures, tables, metatables/metamethods, coroutines, iterators, modules, errors, runtime behavior, coercion, evaluation order
+- `--!strict`, inference, annotations, unions/intersections, generics, function/table types, narrowing, casts, structural typing, exported types, evolving type-solver behavior
+- Roblox services, Instances, DataModel, Script/LocalScript/ModuleScript, lifecycle, signals, Player/Character lifecycle
+- UI, physics, animation, DataStore/MemoryStore/configuration/secrets, networking, replication, streaming, Actors, parallel execution, current engine APIs
+- server/client authority and exploit-resistant architecture
+- performance and profiling
+- syntax/type/runtime/logical/lifecycle/replication/state/memory/performance debugging
+- architecture, coupling, cohesion, dependency direction, APIs, extensibility, maintainability, scalability
+- security, remote validation, authorization, server authority
+- refactoring and migrations
+- code review
 
 LEI structure:
 
@@ -733,11 +455,9 @@ LEI must know when it may be wrong and seek Studio/runtime evidence.
 
 ---
 
-# 36. MASTERY FRAMEWORK
+# 36. MYNO MASTERY FRAMEWORK
 
-A major new cross-cutting framework is the **MYNO Mastery Framework**.
-
-It sits above individual S capabilities and evaluates whether MYNO actually masters a capability rather than merely possessing prompts or documentation.
+The **MYNO Mastery Framework** is a cross-cutting capability above individual S systems.
 
 Every important capability should eventually have:
 
@@ -763,16 +483,16 @@ Mastery is demonstrated by repeated correct behavior across new cases, not by on
 
 # 37. ENGINEERING INTELLIGENCE LAYERS
 
-Beyond S.1-S.25, MYNO needs cross-cutting intelligence layers:
+Required long-term layers include:
 
 ### Evidence Graph
 Trace intent → decision → mutation → observation → verification.
 
 ### Confidence / Uncertainty
-Represent confidence explicitly and trigger observation or human review when uncertainty matters.
+Represent confidence and trigger observation or human review when uncertainty matters.
 
 ### Capability Gap Detection
-Recognize when MYNO lacks a tool, knowledge, runtime capability, or evidence needed for a request.
+Recognize when MYNO lacks a tool, knowledge, runtime capability, or evidence.
 
 ### Regression Corpus
 Preserve failures and solved cases as reusable regression tests.
@@ -799,8 +519,6 @@ If a capability is unavailable, preserve intent with a safe fallback where possi
 
 # 38. TRANSACTION / RECOVERY MODEL
 
-MYNO operations must eventually behave like reliable transactions.
-
 Important primitives:
 
 - operation/task IDs
@@ -824,42 +542,17 @@ A retry must not accidentally duplicate a destructive, financial, or state-chang
 
 # 39. OBSERVABILITY / AUDIT
 
-Production MYNO requires structured observability:
-
-- logs
-- metrics
-- traces
-- task history
-- mutation journals
-- provider health
-- usage/cost
-- security events
-- incident evidence
-- audit logs
+Production MYNO requires structured observability: logs, metrics, traces, task history, mutation journals, provider health, usage/cost, security events, incident evidence, and audit logs.
 
 Observability must not leak secrets or unnecessary customer/project data.
 
-Security-sensitive audit records should answer:
-
-`WHO / WHAT / WHEN / WHERE / WHY / AUTHORIZATION / RESULT`
+Security-sensitive audit records should answer `WHO / WHAT / WHEN / WHERE / WHY / AUTHORIZATION / RESULT`.
 
 ---
 
 # 40. PRIVACY / DATA GOVERNANCE
 
-Customer and project data require explicit lifecycle rules for:
-
-- collection
-- purpose
-- retention
-- deletion
-- access
-- export
-- isolation
-- backup
-- logs
-- support access
-- incident handling
+Customer and project data require explicit lifecycle rules for collection, purpose, retention, deletion, access, export, isolation, backup, logs, support access, and incident handling.
 
 Do not retain data merely because it is technically convenient.
 
@@ -869,54 +562,25 @@ Do not retain data merely because it is technically convenient.
 
 Production must protect MYNO source/IP and customer data.
 
-Direction includes:
-
-- least privilege
-- secret management and rotation
-- dependency security
-- vulnerability monitoring
-- provenance/SBOM where appropriate
-- secure builds
-- controlled artifacts/source maps
-- no debug backdoors
-- environment separation
-- secure update mechanism
-- release auditability
+Direction includes least privilege, secret management/rotation, dependency security, vulnerability monitoring, provenance/SBOM where appropriate, secure builds, controlled artifacts/source maps, no debug backdoors, environment separation, secure update mechanism, and release auditability.
 
 ---
 
 # 42. PAYMENT / CREDIT / ECONOMY
 
-Production payment/credit architecture must be server-authoritative.
+Payment/credit architecture must be server-authoritative.
 
-Required invariants include:
+Required invariants include server-side payment verification, signed/authenticated webhooks, idempotency, atomic entitlement/credit issuance, reconciliation, refunds, chargebacks, duplicate protection, append-only/tamper-resistant credit ledger, atomic debit/credit, replay protection, race protection, negative-balance prevention, and auditability.
 
-- server-side payment verification
-- signed/authenticated webhooks
-- idempotency
-- atomic entitlement/credit issuance
-- reconciliation
-- refunds
-- chargebacks
-- duplicate protection
-- append-only/tamper-resistant credit ledger
-- atomic debit/credit
-- replay protection
-- race protection
-- negative-balance prevention
-- auditability
-
-Daily credits renew every 24 hours using authoritative server time and must resist client-clock manipulation, reconnect/retry/replay abuse.
+Daily credits renew every 24 hours using authoritative server time and resist client-clock manipulation, reconnect/retry/replay abuse.
 
 Purchased credits and daily/promotional credits remain distinguishable with explicit consumption, expiry, refund, and promotion policy.
 
-Anti-farming controls must be layered and lawful and must account for shared devices, privacy, false positives, and appeals.
+Anti-farming controls must be layered and lawful and account for shared devices, privacy, false positives, and appeals.
 
 ---
 
 # 43. CANONICAL RED-TEAM REGISTRY
-
-P3.6-RT minimum registry:
 
 1. direct prompt injection
 2. indirect prompt injection
@@ -957,11 +621,11 @@ Red-team loop:
 
 # 44. EXPERIENCE-COMPLETE BUILDING RULES
 
-For player-facing experiences, MYNO must reason across:
+For player-facing experiences:
 
 `PLAYER/OWNER INTENT → GAME DESIGN → SYSTEM DESIGN → ARCHITECTURE → CONTENT → IMPLEMENTATION → PLAYTEST → CRITIQUE → POLISH → VERIFY → RELEASE`
 
-Technical correctness is necessary but not sufficient.
+Technical correctness is necessary but insufficient.
 
 Consider core fantasy, gameplay loop, onboarding, progression, difficulty, rewards, quests, economy, social systems, replayability, pacing, retention, monetization pressure, accessibility, clarity, visual quality, audio, animation, VFX, and environmental storytelling.
 
@@ -981,27 +645,13 @@ Simulation is evidence/hypothesis, not a guarantee of human behavior.
 
 # 46. CONTENT FACTORY
 
-Reusable content primitives should support:
-
-- asset families
-- building families
-- props
-- roads
-- biome variants
-- zones
-- NPC archetypes
-- quest templates
-- item families
-- UI patterns
-- VFX/audio patterns
+Reusable content primitives should support asset families, building families, props, roads, biome variants, zones, NPC archetypes, quest templates, item families, UI patterns, and VFX/audio patterns.
 
 Content generation must respect project style, gameplay purpose, performance budgets, licensing/provenance, deterministic placement, ownership, and duplication controls.
 
 ---
 
 # 47. FULL LIFECYCLE / LIVEOPS
-
-Publishing is not the end.
 
 Canonical lifecycle:
 
@@ -1013,20 +663,7 @@ Eventually support versioning, staging, controlled rollout, publish validation, 
 
 # 48. RELEASE / MIGRATION / DISASTER RECOVERY
 
-Production architecture must eventually support:
-
-- release candidates
-- staging
-- canary/controlled rollout
-- versioned migrations
-- backward compatibility where required
-- code rollback
-- data/schema rollback or forward recovery strategy
-- backups
-- restore drills
-- disaster recovery
-- incident response
-- emergency shutdown
+Production architecture must eventually support release candidates, staging, canary/controlled rollout, versioned migrations, backward compatibility, code rollback, data/schema recovery strategy, backups, restore drills, disaster recovery, incident response, and emergency shutdown.
 
 A code rollback without a data compatibility strategy is not a complete rollback strategy.
 
@@ -1042,27 +679,7 @@ Permanent hidden branches are technical debt and require ownership and cleanup p
 
 # 50. ADMIN CONTROL PLANE
 
-Production admin tooling should eventually control, as authorized:
-
-- users
-- tenants
-- sessions
-- credits/ledger
-- purchases
-- refunds
-- chargebacks
-- usage
-- provider health/quotas/costs
-- infrastructure health
-- security events
-- abuse/risk
-- rate limits
-- feature flags
-- emergency stop
-- incidents
-- audit logs
-- support
-- controlled emergency operations
+Production admin tooling should eventually control, as authorized, users, tenants, sessions, credits/ledger, purchases, refunds, chargebacks, usage, provider health/quotas/costs, infrastructure health, security events, abuse/risk, rate limits, feature flags, emergency stop, incidents, audit logs, support, and controlled emergency operations.
 
 Emergency operations must be authenticated, authorized, logged, and recoverable.
 
@@ -1074,8 +691,7 @@ Target architecture:
 
 `Cloudflare → Reverse Proxy/Edge → MYNO API → Authentication → Authorization → Tenant Isolation → Entitlements → Credits/Usage Ledger → Payment Verification → Security/Abuse → Observability/Audit → Provider Gateway → Multi-Provider/Multi-Cloud Pool`
 
-PostgreSQL is the source of truth where relational durable state is required.
-Redis is for acceleration/cache/coordination/rate limiting where appropriate, not the authoritative financial ledger.
+PostgreSQL is the source of truth where relational durable state is required. Redis is for acceleration/cache/coordination/rate limiting where appropriate, not the authoritative financial ledger.
 
 Desktop must not contain provider master secrets, payment secrets, database credentials, or admin secrets.
 
@@ -1085,71 +701,9 @@ Desktop must not contain provider master secrets, payment secrets, database cred
 
 Beta is a real live customer/revenue test with many concurrent users, not a technical preview.
 
-Before Beta:
+Before Beta, evidence must cover engineering, security, product, infrastructure/scale, economy, and customer safety.
 
-### Engineering
-- Luau/LEI mastery evaluation
-- Roblox architecture
-- placement
-- dependencies
-- runtime execution
-- autonomous debugging
-- regression
-- performance
-- multiplayer/replication
-- real E2E
-
-### Security
-- full red team
-- injection/tool abuse
-- traversal/secret leakage
-- authorization/privilege boundaries
-- Studio/tenant isolation
-- resource exhaustion
-- destructive controls
-- emergency stop
-- rollback/recovery
-- payment/credit/account abuse
-- supply chain
-
-### Product
-- website
-- end-user program
-- onboarding
-- dashboard
-- authentication
-- UX/error recovery
-- support
-- usage/credits
-- payment
-- provider failover
-- telemetry/diagnostics
-- admin control plane
-
-### Infrastructure/Scale
-- many simultaneous users
-- burst and sustained load
-- concurrent jobs
-- provider degradation
-- database/cache pressure
-- queues/backlog
-- rate limits
-- recovery
-- deployment/rollback
-
-### Economy
-- real purchases
-- real provider/infrastructure costs
-- free-tier optimization
-- unit economics
-- revenue/margin measurement
-
-### Customer safety
-- deterministic dangerous-operation boundaries
-- no uncontrolled destructive mutations
-- audit trail
-- recoverability
-- backup/version strategy
+Required direction includes many simultaneous users, burst/sustained load, provider degradation, database/cache pressure, queues, recovery, real purchases, real cost measurement, free-tier optimization without deceptive degradation, full security/red-team coverage, tenant isolation, observability, support, dashboard, authentication, admin controls, backup/restore, and rollback.
 
 Beta ladder:
 
@@ -1159,29 +713,11 @@ Beta ladder:
 
 # 53. BETA ECONOMICS
 
-Optimize legitimate sustainable free-tier/provider usage without degrading:
-
-- customer experience
-- performance
-- reliability
-- security
-- data integrity
-- payment/credit integrity
-- tenant isolation
-- recoverability
+Optimize legitimate sustainable free-tier/provider usage without degrading customer experience, performance, reliability, security, data integrity, payment/credit integrity, tenant isolation, or recoverability.
 
 Free tiers are an economic optimization layer, never the sole reliability foundation.
 
-Track:
-
-- revenue
-- provider cost
-- infrastructure cost
-- payment fees
-- support cost
-- gross margin
-- cost per task
-- cost per active customer
+Track revenue, provider cost, infrastructure cost, payment fees, support cost, gross margin, cost per task, and cost per active customer.
 
 No deceptive degradation or hidden performance penalty.
 
@@ -1215,16 +751,7 @@ Documentation of future capabilities does not mean those capabilities are implem
 
 # 56. DECISION / CHANGE MANAGEMENT
 
-Major architectural decisions should be recorded with:
-
-- decision
-- context
-- alternatives considered
-- reason
-- invariant introduced
-- migration implications
-- future reversal conditions
-- evidence
+Major architectural decisions should be recorded with decision, context, alternatives, reason, invariant introduced, migration implications, future reversal conditions, and evidence.
 
 When a major decision changes, update this memory and `AGENTS.md` together.
 
@@ -1236,19 +763,9 @@ Avoid silent architecture drift.
 
 Roblox, Luau, Studio, MCP, providers, SDKs, payment systems, and platform policies change.
 
-MYNO knowledge must eventually track:
-
-- source/provenance
-- retrieval/update date
-- version/engine context
-- confidence
-- superseded status
-- compatibility notes
-- validation status
+MYNO knowledge must eventually track source/provenance, retrieval/update date, version/engine context, confidence, superseded status, compatibility notes, and validation status.
 
 Current official Roblox documentation and real Studio/runtime evidence outrank stale model memory.
-
-As one current example, Roblox documentation confirms ongoing evolution of Luau type checking and parallel execution capabilities; therefore MYNO must treat engine/type-system behavior as version-sensitive rather than immutable. citeturn0search0turn0search1turn0search11
 
 ---
 
@@ -1256,15 +773,7 @@ As one current example, Roblox documentation confirms ongoing evolution of Luau 
 
 The strongest MYNO is not the one that sounds most certain.
 
-It is the one that knows:
-
-- what it knows
-- what it inferred
-- what it observed
-- what it tested
-- what it could not test
-- what may have changed
-- what remains uncertain
+It is the one that knows what it knows, what it inferred, what it observed, what it tested, what it could not test, what may have changed, and what remains uncertain.
 
 When evidence is missing, stop, observe, ask, or safely degrade.
 
