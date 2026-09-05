@@ -790,3 +790,170 @@ The goal is:
 > **Correct, secure, maintainable, observable, verifiable, recoverable, extensible engineering that produces a good Roblox experience and remains capable of evolving as technology changes.**
 
 MYNO must be built for the future without pretending to already possess it.
+
+
+---
+
+# 60. RESTORATION & CONSOLIDATION GUARANTEE
+
+This canonical memory evolves by **preservation-first consolidation**.
+
+Historical architectural intent must not disappear merely because a newer edit makes the document shorter or stylistically cleaner.
+
+The required evolution protocol is:
+
+`PRESERVE → CLASSIFY → MERGE → REMOVE ONLY TRUE DUPLICATION → ADD NEW INFORMATION → VERIFY SEMANTIC COVERAGE`
+
+An editor MUST NOT:
+
+- summarize away architectural decisions;
+- remove future roadmap milestones because they are not yet active;
+- collapse explicit invariants into ambiguous prose;
+- rewrite historical decisions without preserving their meaning;
+- delete detailed capability requirements for stylistic brevity;
+- replace a precise list with a vague statement that loses operational meaning.
+
+**No Semantic Deletion Without Explicit Justification.** If a substantive canonical item is intentionally removed, record the removed item, reason, superseding decision, migration/impact, and decision date.
+
+---
+
+# 61. CANONICAL DECISION LEDGER
+
+Major architectural decisions must be traceable. Each substantive decision should eventually have:
+
+- Decision ID
+- Decision
+- Context/problem
+- Alternatives considered
+- Why this decision was chosen
+- Stable invariant introduced
+- Replaceable implementation details
+- Migration implications
+- What it supersedes
+- Evidence
+- Current status
+- Conditions that justify revisiting it
+
+Examples of already established decision classes include provider neutrality, cloud-first inference, explicit Studio identity, deterministic policy authority, semantic verification, preservation-first project memory, and gated roadmap progression.
+
+The purpose is to preserve not only **what** was decided, but **why**.
+
+---
+
+# 62. SEMANTIC COVERAGE AUDIT
+
+Before a major rewrite of this memory or `AGENTS.md`, perform a semantic coverage audit.
+
+The audit compares the proposed version against the previous canonical version and verifies coverage of:
+
+- vision and user experience;
+- architectural invariants;
+- subsystem requirements;
+- LEI and mastery requirements;
+- security lessons and red-team scope;
+- roadmap gates;
+- production and Beta requirements;
+- economics and customer fairness;
+- cloud/provider direction;
+- source/IP protection;
+- decision rationale;
+- operating rules.
+
+The goal is not textual similarity. The goal is preservation of substantive meaning.
+
+A shorter document is not automatically a better document.
+
+---
+
+# 63. EXPLICIT END-TO-END USER OUTCOME
+
+The long-term user outcome remains explicitly decomposed. For a technically executable Roblox request, MYNO should eventually be able to:
+
+1. understand the user's intent;
+2. determine explicit and implicit requirements;
+3. inspect the existing project;
+4. understand the existing architecture and conventions;
+5. build/update the Architecture Graph;
+6. decompose the request into artifacts and systems;
+7. determine ownership and runtime behavior;
+8. determine correct Roblox placement;
+9. determine dependencies and communication;
+10. assess security, authority, persistence, and replication implications;
+11. create bounded mutation plans;
+12. enforce deterministic policy and authorization;
+13. implement systems and supporting infrastructure;
+14. build or modify assets, spatial construction, terrain, atmosphere, lighting, and environment when required;
+15. test the implementation;
+16. observe real runtime behavior;
+17. verify semantic correctness rather than only structure;
+18. detect failures and uncertainty;
+19. diagnose root causes;
+20. repair safely;
+21. re-test and run regressions;
+22. review architecture;
+23. refactor when justified;
+24. review player-facing experience and polish;
+25. preserve unrelated project integrity;
+26. report exactly what happened and what remains uncertain;
+27. persist trustworthy lessons and project memory.
+
+The target is not a script generator. The target is an engineering lifecycle.
+
+---
+
+# 64. ROADMAP STATUS MATRIX
+
+The canonical distinction between roadmap design and execution is mandatory:
+
+| Phase | Canonical status | Entry condition |
+|---|---|---|
+| P3.6-S | ACTIVE | Current intelligence foundation |
+| S.1-S.25 + LEI | ACTIVE / sequentially gated | Each subsystem evidence-defined |
+| P3.6-R | BLOCKED | P3.6-S scope completion |
+| P3.6-RT | BLOCKED | Runtime stabilization evidence |
+| P3.6-CERTIFIED | BLOCKED | Full defined certification gates |
+| P3.7 Autonomous Execution | BLOCKED | Actual P3.6 certification |
+| P3.8 / P3.9 | FUTURE | Defined after preceding gates |
+| Pre-Beta Gates | FUTURE | Product/production readiness |
+| Customer Beta | FUTURE | All Beta gates evidenced |
+| Public Release | FUTURE | Beta evidence supports release |
+
+Status labels such as PLANNED, DESIGNED, IN PROGRESS, IMPLEMENTED, VERIFIED, CERTIFIED, BLOCKED, and DEPRECATED must not be conflated.
+
+---
+
+# 65. RESTORATION BASELINE & HISTORICAL LESSON
+
+The initial canonical memory established explicit detail for the 22-step user outcome, P3.6-S subsystem examples, security model, task budgets, emergency stop, mutation transactions, current P3.6 lessons, runtime/red-team/certification gates, and assistant/project governance roles.
+
+Later expansions added LEI, Mastery Framework, Evidence Graph, capability gaps, knowledge freshness, production security, payments/credits, multi-tenancy, Beta economics, experience-complete building, simulation, content factory, LiveOps, cloud direction, and admin control-plane requirements.
+
+**Both bodies of intent are canonical.** Future consolidation must preserve the union of meaningful requirements rather than choosing one generation of the document over another.
+
+---
+
+# 66. PROJECT GOVERNANCE ROLES
+
+For long-term engineering governance, the project requires these conceptual responsibilities:
+
+- **Technical Direction:** protect long-term architecture and roadmap gates.
+- **Principal Engineering:** favor robust systems over short-term patches.
+- **Architecture Review:** verify implementation matches intended architecture.
+- **Security Review:** challenge assumptions through deterministic and adversarial analysis.
+- **Product/Engineering Strategy:** connect technical choices to the ultimate MYNO product.
+- **Project Memory Stewardship:** prevent roadmap and decision drift.
+- **Reality Check:** disagree with technically weak, unsafe, premature, or unsupported claims.
+
+These are responsibilities, not claims that a single implementation already provides all organizational capabilities.
+
+---
+
+# 67. CANONICAL CURRENT DECISION
+
+The immediate strategic direction remains unchanged:
+
+`COMPLETE P3.6-S → COMPLETE S.1-S.25 + LEI → P3.6-R → P3.6-RT → P3.6-CERTIFIED → P3.7`
+
+Future product, cloud, Beta, revenue, and public-release planning must inform architecture but must not be used as an excuse to skip intelligence, runtime, security, or certification gates.
+
+The next implementation work should therefore be chosen from the active P3.6-S foundation according to dependency order and evidence readiness.
