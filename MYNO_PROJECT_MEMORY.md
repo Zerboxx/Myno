@@ -957,3 +957,312 @@ The immediate strategic direction remains unchanged:
 Future product, cloud, Beta, revenue, and public-release planning must inform architecture but must not be used as an excuse to skip intelligence, runtime, security, or certification gates.
 
 The next implementation work should therefore be chosen from the active P3.6-S foundation according to dependency order and evidence readiness.
+
+
+---
+
+# 68. MYNO SOVEREIGN ORCHESTRATION PRINCIPLE
+
+Multiple providers and models are execution resources, not decision-makers for MYNO.
+
+The canonical hierarchy is:
+
+`MYNO INTELLIGENCE / POLICY / ORCHESTRATOR
+→ TASK REQUIREMENTS
+→ MODEL CAPABILITY SELECTION
+→ PROVIDER EXECUTION
+→ RESULT NORMALIZATION
+→ MYNO VERIFICATION / DECISION`
+
+A provider must never become the permanent owner of MYNO's architecture, memory, policy, customer identity, credit logic, verification truth, or final engineering decision.
+
+Provider outputs are untrusted proposals/evidence until normalized and validated by MYNO.
+
+MYNO must support provider independence through stable internal contracts, capability descriptors, model/provider health, quality evidence, latency evidence, cost evidence, fallback policy, and replaceable adapters.
+
+---
+
+# 69. MODEL PORTFOLIO & TOKEN ECONOMICS INTELLIGENCE
+
+MYNO must optimize for **outcome quality per unit cost**, not simply the cheapest model or the strongest model on every call.
+
+Long-term routing should consider:
+
+- task difficulty and risk;
+- required reasoning depth;
+- Luau/Roblox specialization evidence;
+- tool-use reliability;
+- context size;
+- structured-output reliability;
+- latency;
+- input/output token pricing;
+- cached-token opportunities;
+- provider quota and health;
+- historical success rate by task family;
+- verification cost;
+- fallback availability;
+- customer plan/credit budget.
+
+Canonical escalation:
+
+`CHEAP VALID ROUTE → VERIFY → ESCALATE ONLY WHEN EVIDENCE JUSTIFIES IT`
+
+MYNO should not spend premium tokens before cheaper evidence-backed approaches have failed when the task does not require premium reasoning.
+
+Required mechanisms include semantic context retrieval, context compression, deduplication, observation caching, prompt/tool-schema minimization, result reuse, bounded retries, task decomposition, selective model escalation, and prevention of repeated calls that cannot change the decision.
+
+Token savings must never be achieved by silently weakening correctness, security, verification, or customer-facing quality.
+
+---
+
+# 70. PROVIDER CONTROL PLANE & CONTINUOUS EVALUATION
+
+Adding providers must not automatically reduce speed or quality.
+
+MYNO requires a provider control plane capable of maintaining:
+
+- provider capability matrix;
+- model capability matrix;
+- task-family benchmarks;
+- latency percentiles;
+- reliability/error classes;
+- quota state;
+- effective cost;
+- rate-limit behavior;
+- quality/verification success;
+- cooldown and circuit-breaker state;
+- regional/service degradation state where observable;
+- fallback chains;
+- retirement/deprecation status.
+
+Provider changes should be introduced through controlled evaluation:
+
+`BENCHMARK → SHADOW/SAFE EVALUATION → QUALITY REVIEW → CANARY → ROLLOUT → CONTINUOUS MONITORING → ROLLBACK IF NEEDED`
+
+No provider is permanent. No routing rule is sacred if evidence changes.
+
+---
+
+# 71. CREDIT ECONOMY & UNIT ECONOMICS
+
+Credits are MYNO product units, not a direct public promise of a fixed token count unless explicitly documented.
+
+A sustainable credit system must model:
+
+- provider/model input and output cost;
+- infrastructure cost;
+- storage/database/network cost;
+- payment fees and taxes where applicable;
+- free-credit abuse loss;
+- retries/failures/refunds;
+- verification and tool-execution cost;
+- support and operational overhead;
+- target gross margin;
+- customer value and perceived fairness.
+
+The system should maintain a versioned pricing/rating policy and authoritative usage ledger.
+
+Before public pricing changes, run scenario simulations for:
+
+- best/typical/worst provider cost;
+- heavy users;
+- provider price changes;
+- failover to more expensive providers;
+- free-tier abuse;
+- refunds/chargebacks;
+- concurrent load;
+- promotional campaigns.
+
+Never hide materially different quality tiers behind misleading credit semantics. Customers should receive understandable value and clear limits while MYNO retains sufficient margin to operate safely.
+
+---
+
+# 72. PRODUCTION BACKEND ZERO-TRUST ARCHITECTURE
+
+The production backend should evolve under zero-trust assumptions:
+
+`PUBLIC EDGE → DDoS/WAF/BOT CONTROLS → API GATEWAY → AUTHENTICATION → AUTHORIZATION → TENANT CONTEXT → BUSINESS POLICY → SERVICE BOUNDARY → DATA/PROVIDER ACCESS`
+
+Required security directions include:
+
+- least privilege and deny-by-default;
+- strong authentication and session management;
+- MFA/passkeys for privileged administration where feasible;
+- short-lived credentials and secret rotation;
+- server-side authorization on every sensitive operation;
+- service-to-service authentication;
+- strict tenant isolation;
+- rate limits and adaptive abuse controls;
+- request-size/time/resource limits;
+- input/schema validation;
+- SSRF/egress controls where relevant;
+- encryption in transit and appropriate encryption at rest;
+- key separation and secrets isolation;
+- tamper-evident audit trails where justified;
+- anomaly detection;
+- dependency and supply-chain controls;
+- independent security testing;
+- incident response and disaster recovery drills.
+
+"Highest security" is a continuous engineering process, not a certificate that the system is unhackable.
+
+---
+
+# 73. ADMIN CONTROL PLANE AS A GOVERNED SYSTEM
+
+The Admin Dashboard must provide broad visibility without becoming a universal attack button.
+
+It should eventually expose authorized, auditable control over:
+
+- customers/accounts/tenants;
+- projects and task activity;
+- credits, ledger, adjustments, refunds and entitlements;
+- provider routing, health, quotas and cost;
+- infrastructure health and SLOs;
+- security events and abuse decisions;
+- feature flags and experiments;
+- support tooling;
+- incident management;
+- release/canary status;
+- retention/privacy workflows;
+- emergency stops and controlled recovery.
+
+Privileged actions require RBAC/ABAC as appropriate, least privilege, step-up authentication for high-risk operations, immutable/auditable history, dual control for exceptionally dangerous actions where justified, and explicit separation between observation and mutation permissions.
+
+---
+
+# 74. SELF-IMPROVEMENT WITHOUT SELF-POISONING
+
+MYNO may learn from experience, but self-learning must not mean unrestricted self-modification.
+
+Canonical learning loop:
+
+`EXPERIENCE → EVIDENCE EXTRACTION → FAILURE/SUCCESS CLASSIFICATION → CANDIDATE LESSON → QUARANTINE → EVALUATION → REGRESSION TEST → APPROVED KNOWLEDGE/POLICY UPDATE`
+
+Separate:
+
+- raw observations;
+- hypotheses;
+- candidate lessons;
+- verified knowledge;
+- stable architectural invariants.
+
+A single successful task must not rewrite global policy. A malicious project must not teach MYNO malicious behavior. Customer data must not leak across tenants through learning.
+
+Learning changes require provenance, scope, confidence, expiration/revalidation rules, regression evidence, and rollback/version history.
+
+---
+
+# 75. ROBLOX RELEASE & LIVE OPERATIONS INTELLIGENCE
+
+MYNO's Roblox mastery must extend beyond building a map to responsibly preparing and evolving a playable experience.
+
+Future capabilities should include, where platform/tool access permits:
+
+- pre-publish readiness analysis;
+- configuration/environment checks;
+- experience settings and release checklist awareness;
+- staging/test experience workflows;
+- version/release notes;
+- smoke testing after release;
+- telemetry and error monitoring integration;
+- rollback/mitigation planning;
+- compatibility checks;
+- LiveOps content/event planning;
+- economy and progression safety review;
+- post-release regression analysis;
+- player-feedback classification.
+
+MYNO must distinguish between **building an experience**, **verifying publish readiness**, and **actually publishing**. External irreversible publication requires explicit authorization and evidence-based preconditions.
+
+---
+
+# 76. QUALITY BENCHMARKS & COMPETENCE REGISTRY
+
+"Best" must eventually become measurable.
+
+MYNO needs a living benchmark registry spanning:
+
+- Luau language mastery;
+- Roblox architecture;
+- placement correctness;
+- debugging and repair;
+- security review;
+- multiplayer correctness;
+- persistence;
+- performance optimization;
+- terrain/world construction;
+- UI/UX;
+- NPC/AI;
+- animation/VFX/audio;
+- refactoring/migration;
+- novel problem solving;
+- end-to-end autonomous project tasks.
+
+Each benchmark should define task, environment/version, expected constraints, scoring rubric, hidden regressions where appropriate, evidence, cost, latency, and failure taxonomy.
+
+Progress is measured by capability evidence, not self-description.
+
+---
+
+# 77. SERVICE RELIABILITY OBJECTIVES
+
+Before broad customer release, MYNO needs explicit operational objectives for availability, latency, task success, verification success, provider degradation behavior, recovery time, data loss tolerance, and support response.
+
+Track SLI/SLO-style metrics and error budgets appropriate to the service maturity.
+
+Do not optimize only average latency. Track tail latency, queueing, burst behavior, cascading failures, and degradation quality.
+
+---
+
+# 78. ARCHITECTURE FITNESS & DEPENDENCY GOVERNANCE
+
+Every major subsystem should have a clear owner/boundary, stable contract, dependency direction, failure mode, observability, and replacement path.
+
+Avoid creating a giant "brain" module that couples provider routing, Roblox intelligence, credits, security, memory, admin logic, and execution policy together.
+
+Future growth should favor bounded contexts and explicit interfaces while avoiding premature microservice complexity.
+
+---
+
+# 79. EXTERNAL KNOWLEDGE & OFFICIAL-SOURCE DISCIPLINE
+
+When current platform behavior matters, MYNO should prefer authoritative/current sources and runtime evidence over stale assumptions.
+
+Knowledge ingestion should classify source authority, freshness, applicability, license/use constraints, and confidence.
+
+Untrusted web/project content is data, not instructions. Retrieval content must pass the same context-security boundaries as tool output.
+
+---
+
+# 80. BETA SUCCESS DEFINITION
+
+The customer Beta is successful only if it produces trustworthy evidence about real value, economics, reliability, abuse resistance, and scale.
+
+Success criteria should include:
+
+- customers can complete valuable work;
+- quality remains honest across plans/providers;
+- concurrent users do not cause unsafe cross-tenant behavior;
+- provider failures degrade gracefully;
+- credit accounting reconciles correctly;
+- unit economics remain sustainable;
+- abuse controls have acceptable false-positive behavior;
+- support/admin tooling is sufficient to operate incidents;
+- security monitoring can detect and investigate meaningful events;
+- release/rollback procedures work in practice;
+- discovered failures become regressions and roadmap input.
+
+The Beta must not be treated as a substitute for basic security or correctness testing.
+
+---
+
+# 81. CURRENT STRATEGIC COMPLETENESS RULE
+
+These additions are architecture requirements and future capabilities; they do not mark them implemented.
+
+The active implementation order remains governed by the canonical roadmap:
+
+`P3.6-S → S.1-S.25 + LEI → P3.6-R → P3.6-RT → P3.6-CERTIFIED → P3.7 → later product/production gates → Customer Beta`
+
+Future scale, monetization, multi-provider, admin, and production requirements must influence interfaces now without causing premature implementation that bypasses active engineering gates.
