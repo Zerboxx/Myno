@@ -1,371 +1,648 @@
 # MYNO Agent Rules
 
-This file defines the mandatory operating rules for any AI agent, coding
-agent, or engineer modifying the MYNO repository.
-
-`MYNO_PROJECT_MEMORY.md` is the canonical project memory and engineering
-constitution. These rules enforce how work must be performed; the memory
-defines what the system is trying to become.
+This file defines the mandatory operating rules for any AI agent, coding agent, or engineer modifying MYNO.
+`MYNO_PROJECT_MEMORY.md` is the canonical long-term project memory and engineering constitution. This file defines how work is performed; the memory defines what MYNO is becoming.
 
 ---
 
-## 1. Mandatory Startup Protocol
+## 1. Startup Protocol — Mandatory
 
-Before modifying this repository:
+Before modifying the repository:
 
 1. Read `MYNO_PROJECT_MEMORY.md`.
-2. Read this `AGENTS.md`.
+2. Read this file.
 3. Determine the current project phase and roadmap gate.
-4. Inspect the relevant repository state and existing implementation.
-5. Identify architectural invariants and constraints.
-6. Define the intended scope before editing.
+4. Inspect the relevant repository state and implementation.
+5. Identify architectural invariants, contracts, and compatibility constraints.
+6. Define intended scope before editing.
 7. Preserve unrelated work.
 
-Never skip the startup protocol because a change appears small.
+Never skip this because a change looks small.
 
----
-
-## 2. Roadmap Gates Are Mandatory
-
-The canonical roadmap is:
+Current roadmap:
 
 `P3.6-S → Complete S.1-S.25 + LEI → P3.6-R → P3.6-RT → P3.6-CERTIFIED → P3.7 → P3.8 → P3.9 → Pre-Beta Gates → Customer Beta Ladder → Public Release Decision`
 
-Rules:
-
-- Do not skip roadmap gates.
-- Do not implement later-phase requirements as a reason to bypass earlier
-  engineering gates.
-- LEI is a cross-cutting P3.6-S capability, not S.26.
-- P3.7 autonomous execution begins only after the defined P3.6 certification
-  gate has actually passed.
-- Customer Beta is a real customer/revenue test, not a technical preview.
+LEI is cross-cutting P3.6-S capability, not S.26. Do not skip gates. Do not call a later phase active merely because its design has been documented.
 
 ---
 
-## 3. Architecture Invariants
-
-The core principle is:
+## 2. Core Architecture Invariant
 
 **LLM proposes. Deterministic systems decide.**
 
-The model must never be the final authority for:
+The model is never the final authority for:
 
-- authorization
-- permissions
-- placement
+- authorization or permissions
+- tenant or Studio identity
+- placement and ownership
 - mutation scope
-- Studio identity
-- destructive operations
 - security policy
-- budgets
+- destructive operations
 - tool access
+- budgets and resource limits
+- payment/credit entitlements
 - verification
 - rollback/recovery
-- resource limits
-- payment/credit entitlements
-- tenant isolation
+- lifecycle transitions
 
-Provider-neutral architecture must be preserved.
+Provider-neutral architecture is mandatory. Provider-specific behavior belongs behind provider abstractions/gateways.
 
-Do not introduce provider-specific logic deep into the agent architecture.
-
-Every Roblox MCP call MUST be explicitly bound to the correct `studio_id`.
-There must be no implicit global active-Studio assumption.
+Every Roblox MCP call MUST be explicitly bound to the correct `studio_id`. Never rely on a global active Studio.
 
 ---
 
-## 4. Engineering Scope Discipline
+## 3. Future-Proof Engineering Rule
+
+Assume every implementation may evolve.
+
+Do not design today's implementation as if today's:
+
+- provider
+- model
+- Roblox API
+- Studio MCP capability
+- storage engine
+- UI
+- payment provider
+- database schema
+- tool schema
+- artifact representation
+- game design
+- customer workflow
+- pricing model
+- deployment topology
+
+is permanent.
+
+Prefer stable contracts, adapters, capability discovery, versioning, migrations, compatibility layers, deprecation paths, feature flags, and replaceable components.
+
+Every major architectural decision should answer:
+
+- What is stable?
+- What is replaceable?
+- What is versioned?
+- What can be deprecated?
+- How is migration performed?
+- How is backward compatibility handled?
+- What evidence would justify changing the decision later?
+
+Do not over-engineer hypothetical features; create extension points where change is reasonably foreseeable.
+
+---
+
+## 4. Scope Discipline
 
 - Do not introduce unrelated features.
-- Do not make feature-specific hacks when a reusable primitive is appropriate.
-- Prefer extensible architecture over one-off patches.
+- Prefer reusable primitives over feature-specific hacks.
 - Do not introduce global mutable state for convenience.
-- Do not silently change public behavior or architectural contracts.
-- Do not weaken existing security or verification to make a task easier.
+- Do not silently change public behavior or contracts.
+- Do not weaken security or verification to make work easier.
 - Preserve unrelated working-tree changes.
-- Never blindly overwrite files or mass-delete content.
+- Never blindly overwrite or mass-delete files.
+- Do not make architecture decisions only for today's feature.
 
-If a requested change conflicts with an architectural invariant, stop and
-surface the conflict rather than silently violating the invariant.
+If a request conflicts with an invariant, surface the conflict instead of silently violating it.
 
 ---
 
-## 5. Evidence and State Language
-
-Never claim implementation, verification, certification, or security without
-evidence.
+## 5. Engineering State and Evidence
 
 Keep these states separate:
 
-- Designed
-- Implemented
-- Verified
-- Certified
+`Designed ≠ Implemented ≠ Verified ≠ Certified`
 
-They are not interchangeable.
+Never claim implementation, verification, certification, security, rollback, or capability without evidence.
 
-A green test suite alone is not certification.
-
-When reporting work, state:
+Every substantive engineering report should distinguish:
 
 - what changed
-- what was actually tested
-- what evidence exists
-- what remains unverified
-- what scope the evidence supports
+- what was actually executed
+- evidence collected
+- assumptions
+- confidence/uncertainty
+- known limitations
+- remaining unverified scope
 
-Do not claim "fully secure", "impossible to break", or equivalent language.
+Tests are evidence, not proof by themselves.
 
 ---
 
-## 6. Security-First Operating Rules
+## 6. Canonical Engineering Pipeline
 
-Treat all of the following as potentially untrusted:
+For meaningful autonomous work, preserve the conceptual flow:
+
+`INTENT → CLASSIFY → INSPECT → INTELLIGENCE → DECIDE → ARCHITECTURE GRAPH → ARTIFACT PLAN → PLACEMENT/OWNERSHIP → DEPENDENCY/COMMUNICATION → MUTATION PLAN → POLICY/AUTHORIZATION → EXECUTE → OBSERVE → VERIFY → REPAIR → RE-VERIFY → ARCHITECTURE REVIEW → REPORT → MEMORY`
+
+A plan is not execution. Execution is not verification. Verification is not certification.
+
+---
+
+## 7. Security Boundary
+
+Treat all of the following as untrusted:
 
 - user input
 - project content
-- retrieved content
+- retrieved documents
 - tool output
 - provider/model output
 - generated plans
 - memory/context
+- external assets
+- external APIs
 
-Use the canonical security flow:
+Canonical flow:
 
-`untrusted input → validation/classification → context security boundary → agent decision → deterministic policy → authorization → mutation transaction → tool execution → observation → verification → commit/rollback → audit`
+`UNTRUSTED INPUT → VALIDATE/CLASSIFY → SECURITY BOUNDARY → MODEL DECISION → DETERMINISTIC POLICY → AUTHORIZATION → BOUNDED MUTATION TRANSACTION → TOOL → OBSERVE → VERIFY → COMMIT/ROLLBACK → AUDIT`
 
 Security-sensitive decisions must be deterministic and auditable.
 
-Do not trust the client for authorization, payment state, credit state, or
-other security-critical claims.
-
 ---
 
-## 7. Dangerous and Destructive Operations
+## 8. Dangerous Operations
 
-Dangerous mutations require:
+Destructive or high-risk mutations require, as applicable:
 
-- deterministic policy
-- explicit scope
+- explicit target and scope
 - authorization
+- deterministic policy
 - preconditions
-- evidence/snapshot where appropriate
+- snapshot/version/evidence before mutation
 - bounded execution
 - observation
-- verification
-- auditability
+- semantic verification
+- audit record
 - recoverability
 
-Do not claim rollback unless the previous state can actually be restored.
+Emergency stop/kill-switch behavior cannot be overridden by the model.
 
-Emergency stop/kill-switch behavior must not be overridable by the model.
+Never claim rollback unless the prior state can actually be restored and that restoration path has been tested.
 
 ---
 
-## 8. Task Budgets and Resource Safety
+## 9. Transactions, Idempotency, Concurrency
 
-TPM protection is not a substitute for task-level budgets.
+Agent operations must be designed to survive retries, duplicate delivery, partial failure, and concurrent work.
 
-Task budgets must be enforced across retries and recovery and should cover,
-as applicable:
+Prefer:
 
-- model calls
+- idempotent operations
+- stable operation/task IDs
+- preconditions
+- optimistic concurrency/version checks
+- leases/ownership where needed
+- bounded locks rather than global locks
+- commit points
+- compensation/rollback actions
+- atomic state transitions where available
+- duplicate detection
+- stale-state rejection
+
+Never assume a tool call happens exactly once.
+
+Never allow a retry to silently duplicate a destructive or financial mutation.
+
+---
+
+## 10. Budgets and Resource Safety
+
+TPM protection is not task budgeting.
+
+Task budgets must survive retries and recovery and should cover as applicable:
+
+- model calls/tokens
 - tool calls
-- mutations
-- created instances
-- deleted instances
 - runtime
+- mutations
+- created/deleted instances
+- asset operations
+- screenshots/observations
 - retries
 - recovery attempts
-- tokens
+- concurrency
 - output size
+- financial/provider cost
 
-Budgets must not reset merely because the agent enters another iteration,
-retry, or recovery path.
+Avoid retry storms, recovery loops, uncontrolled concurrency, memory growth, and resource exhaustion.
 
-Avoid retry storms, recovery loops, uncontrolled concurrency, and resource
-exhaustion.
+A budget failure must fail closed or degrade safely, not silently bypass limits.
 
 ---
 
-## 9. Roblox Engineering / LEI Rules
+## 11. Roblox Engineering / LEI
 
-LEI is part of P3.6-S and must be treated as a real engineering knowledge,
-curriculum, and evaluation system.
+LEI is a real Knowledge + Curriculum + Evaluation system inside P3.6-S.
 
-It must support MYNO's ability to:
+Target:
 
 `Understand → Design → Generate → Review → Test → Debug → Optimize → Secure → Refactor → Invent`
 
-LEI coverage includes Luau semantics, strict typing, Roblox APIs/lifecycle,
-client/server architecture, networking, replication, performance,
-debugging, security, architecture, refactoring, and code review.
+Coverage must include:
 
-When uncertain, prefer validation against Studio/runtime evidence rather than
-confidently inventing behavior.
+- Luau syntax and semantics
+- scope, closures, tables, metatables/metamethods, coroutines, iterators, modules, errors, runtime behavior
+- `--!strict`, inference, annotations, unions/intersections, generics, narrowing, casts, structural typing
+- Roblox services, Instances, DataModel, lifecycle, signals, Player/Character lifecycle
+- Script/LocalScript/ModuleScript behavior and placement
+- UI, physics, animation, persistence, networking, replication
+- server authority and exploit-resistant client/server boundaries
+- performance, allocation, GC, RunService, parallel Luau, Actors, native-code paths where applicable
+- syntax/type/runtime/logical/lifecycle/replication/state/memory/performance debugging
+- architecture, coupling/cohesion, dependency direction, APIs, extensibility, maintainability
+- security and remote validation
+- safe refactoring and migration
+- code review and failure classification
+
+LEI must be structured as:
+
+`Knowledge → Examples → Anti-patterns → Tests → Challenges → Failure Cases → Benchmarks → Runtime Evidence → Mastery Level`
+
+The knowledge system must record provenance and freshness. When Roblox behavior is uncertain or changing, validate against current official documentation and real Studio/runtime evidence rather than trusting stale memory.
 
 ---
 
-## 10. Verification Rules
+## 12. Verification and Evidence Graph
 
 Verification must be semantic, not merely structural.
 
 Where applicable verify:
 
-- correct artifact
-- correct class
-- correct location
-- correct ownership
-- correct runtime
-- correct dependencies
-- correct communication
-- correct source
-- correct security boundary
-- correct semantic behavior
-- correct runtime behavior
-- correct architecture
+- artifact identity/class
+- location/placement
+- ownership/runtime
+- source
+- dependencies
+- communication
+- lifecycle
+- security boundary
+- intended behavior
+- actual runtime behavior
+- architecture invariants
+- performance/resource behavior
+- player-facing outcome
 
-Observation and verification must be scoped and freshness-aware.
+Observations must be scoped, timestamped/versioned where practical, and freshness-aware.
 
-Do not treat stale observations as current truth.
+Long-term MYNO should maintain an evidence graph connecting intent → plan → mutation → observation → test → verification → decision. Evidence must be traceable and attributable to the source/tool/runtime that produced it.
 
----
-
-## 11. Multi-Studio and Tenant Isolation
-
-Studio identity must always be explicit.
-
-Production customer/tenant isolation must also be explicit.
-
-Never assume:
-
-- a global Studio
-- a global customer
-- a global tenant
-- a shared mutable authorization context
-
-Cross-Studio or cross-tenant access must fail closed and be auditable.
+Confidence should be explicit when evidence is incomplete. Low confidence should trigger further observation or a safe stop rather than fabricated certainty.
 
 ---
 
-## 12. Payment and Credit Safety
+## 13. Architecture Intelligence
 
-If payment/credit systems are modified, preserve these invariants:
+The Architecture Graph is a first-class project model, not documentation decoration.
+
+It should represent:
+
+- artifacts
+- ownership
+- runtime
+- placement
+- dependencies
+- communication
+- persistence
+- lifecycle
+- security boundaries
+- responsibilities
+- contracts
+- versions
+- feature flags
+- migrations
+- evidence
+
+Before high-impact changes, MYNO should perform change-impact analysis against the graph and identify affected systems, tests, contracts, data, and player experience.
+
+---
+
+## 14. Artifact / Contract Discipline
+
+Artifacts should have machine-readable contracts where useful, including:
+
+- identity
+- type
+- owner
+- placement
+- inputs/outputs
+- dependencies
+- runtime side
+- security assumptions
+- lifecycle
+- version
+- compatibility policy
+- verification criteria
+
+Generated or modified artifacts must be reconciled against the intended contract after execution.
+
+Drift must be detected rather than silently accepted.
+
+---
+
+## 15. Placement and Roblox Runtime Rules
+
+Placement is semantic. It depends on runtime ownership, replication, lifecycle, dependencies, security, and performance.
+
+Examples include ServerScriptService, ServerStorage, ReplicatedStorage, StarterPlayerScripts, StarterCharacterScripts, StarterGui, Workspace, Lighting, SoundService, Terrain, and other current/future Roblox containers.
+
+Do not hard-code old assumptions where Roblox changes behavior. Use capability-aware placement logic and current API knowledge.
+
+---
+
+## 16. Dependency, Communication, and State
+
+Understand and verify:
+
+- `require` relationships
+- RemoteEvents/RemoteFunctions
+- Bindables/signals
+- event listeners
+- replicated state
+- shared state
+- service dependencies
+- data dependencies
+- cross-thread/Actor communication
+- network ownership
+- serialization boundaries
+- persistence boundaries
+
+Detect cycles, invalid dependency direction, missing contracts, unsafe trust boundaries, and lifecycle hazards before runtime where possible.
+
+---
+
+## 17. Roblox Runtime and Performance
+
+Performance is architectural and evidence-driven.
+
+Consider CPU, memory, rendering, network, replication, streaming, object counts, event frequency, allocations, GC, physics, expensive loops, asset cost, and server/client work.
+
+Do not blanket-optimize. Profile, identify a bottleneck, change it, and measure again.
+
+Parallel Luau/Actors, streaming, new engine capabilities, and future runtime features must be treated as capability-dependent options, not permanent assumptions.
+
+---
+
+## 18. Data, Persistence, and Schema Evolution
+
+Persistence systems require:
+
+- validation
+- schema versioning
+- migration plans
+- backward compatibility where needed
+- corruption detection
+- safe defaults
+- recovery strategy
+- idempotent writes
+- concurrency/race protection
+- test/live environment separation
+
+Never test destructive persistence behavior against live production data.
+
+Separate durable state, temporary distributed state, configuration, secrets, and session memory according to their semantics.
+
+---
+
+## 19. Multiplayer and Security
+
+The server owns authoritative game state whenever the design requires it.
+
+Every client-originated state-changing request must be validated server-side for type, range, ownership, authorization, rate, context, and game-state legality as applicable.
+
+Never trust client claims for money, inventory, rewards, progression, permissions, or other authoritative state.
+
+---
+
+## 20. Autonomous Testing and Runtime Loop
+
+Long-term autonomous loop:
+
+`BUILD → RUN → OBSERVE → DIAGNOSE → REPAIR → RE-RUN → REGRESSION CHECK`
+
+Use appropriate:
+
+- unit
+- integration
+- architecture
+- runtime
+- E2E
+- regression
+- adversarial
+- load/concurrency
+- persistence/recovery
+- player-simulation
+- visual/UX
+- performance
+
+Synthetic players and simulations supplement, not replace, deterministic tests, runtime evidence, security testing, or real user evidence.
+
+---
+
+## 21. Game / Experience Quality
+
+For player-facing work, technical correctness is necessary but insufficient.
+
+Consider:
+
+- core fantasy
+- gameplay loop
+- onboarding
+- progression
+- difficulty
+- economy
+- rewards
+- quests
+- social systems
+- replayability
+- pacing
+- retention risks
+- monetization pressure
+- clarity/friction
+- accessibility
+- visual hierarchy
+- lighting/material/scale consistency
+- landmarks/navigation
+- animation/VFX/audio feedback
+
+Quality progression:
+
+`Functional → Correct → Consistent → Readable → Polished → Immersive → Professional`
+
+Do not substitute agent taste for user intent without surfacing the tradeoff.
+
+---
+
+## 22. Content, Assets, and IP
+
+Reusable content primitives are preferred for asset families, buildings, props, roads, zones, NPCs, quests, items, UI, VFX, and audio.
+
+Generated/imported content must respect:
+
+- project style
+- gameplay purpose
+- performance budgets
+- licensing/IP provenance
+- attribution requirements where applicable
+- deterministic placement
+- ownership
+- duplication controls
+
+Do not use assets of unknown or prohibited provenance in production merely because they look useful.
+
+---
+
+## 23. Project Hygiene and Refactoring
+
+Maintain naming, folder organization, configuration, documentation, dependency direction, duplicate/stale artifact detection, and dead-code hygiene.
+
+Refactors require dependency discovery, behavior preservation, migration sequencing, compatibility planning, regression verification, and cleanup only after references are proven migrated.
+
+---
+
+## 24. Knowledge Freshness / API Drift
+
+Roblox, Luau, Studio, MCP, providers, SDKs, payment systems, and platform policies evolve.
+
+MYNO must not treat retrieved knowledge as timeless truth.
+
+Knowledge records should support:
+
+- source/provenance
+- retrieval/update date
+- version or engine context when known
+- confidence
+- superseded status
+- compatibility notes
+- validation status
+
+When behavior is version-sensitive, record the version context and verify against the target environment.
+
+---
+
+## 25. Capability Discovery and Graceful Degradation
+
+MYNO should discover capabilities rather than assume them.
+
+Tools, providers, Studio instances, model features, Roblox APIs, and deployment services may differ.
+
+If a capability is missing:
+
+1. detect it
+2. explain the limitation
+3. choose a safe supported fallback when one exists
+4. preserve intent where possible
+5. never fake completion
+
+Capability negotiation must be explicit at integration boundaries.
+
+---
+
+## 26. Provider / Model Reliability
+
+Provider failures must be classified and handled deterministically.
+
+Support, as applicable:
+
+- timeout/abort
+- rate limits
+- quota exhaustion
+- transient transport failure
+- invalid request
+- model unavailable
+- malformed output
+- tool-call failure
+- fallback model/provider
+- cooldown/backoff
+- effective-model tracking
+- cost/latency/quality policy
+
+Never report the configured model as effective when fallback actually ran.
+
+---
+
+## 27. Observability and Auditability
+
+Production systems should have structured logs, metrics, traces, task history, security events, mutation journals, provider health, cost/usage data, and incident evidence as appropriate.
+
+Observability must avoid leaking secrets or unnecessary customer/project data.
+
+Audit records should answer who/what/when/where/why/authorization/result for security-sensitive operations.
+
+---
+
+## 28. Privacy and Data Governance
+
+Customer/project data must have explicit lifecycle rules for:
+
+- collection
+- purpose
+- retention
+- deletion
+- access
+- export
+- isolation
+- backups
+- logging
+- support access
+- incident handling
+
+Do not retain data merely because it is technically convenient.
+
+---
+
+## 29. Production Security / Supply Chain
+
+Production direction includes:
+
+- least privilege
+- secret management and rotation
+- dependency pinning/update policy
+- vulnerability monitoring
+- provenance/SBOM where appropriate
+- secure build pipeline
+- signed/controlled releases where feasible
+- environment separation
+- secure source maps/artifacts
+- no debug backdoors
+- secure update mechanism
+- deployment auditability
+
+---
+
+## 30. Payments, Credits, and Abuse
+
+If applicable, payment/credit systems must preserve:
 
 - server-side payment verification
-- authenticated/signed webhooks
+- signed/authenticated webhooks
 - idempotency
 - atomic entitlement/credit issuance
 - reconciliation
-- refund/chargeback handling
-- duplicate-payment protection
-- append-only or otherwise tamper-resistant credit ledger
+- refunds/chargebacks
+- duplicate protection
+- append-only/tamper-resistant ledger
 - atomic debit/credit
-- replay protection
-- race-condition protection
+- replay/race protection
 - negative-balance prevention
 - auditability
 
-Daily credits must use authoritative server time, renew on a 24-hour basis,
-and be resistant to reconnect/retry/replay/client-clock manipulation.
+Daily credits use authoritative server time, not client clocks. Purchased and promotional/daily credits remain distinguishable.
 
-Purchased and daily/promotional credits must remain distinguishable.
-
-Never grant credits because a client says payment succeeded.
+Anti-abuse controls must be layered and lawful; do not rely only on IP/device fingerprinting. Account history, velocity, behavior, payment relationships, and abuse history may contribute to risk decisions while accounting for shared devices, privacy, false positives, and appeals.
 
 ---
 
-## 13. Anti-Abuse / Multi-Account Farming
+## 31. Multi-Studio / Multi-Tenant Isolation
 
-The system should mitigate daily-credit farming and similar abuse using
-layered, lawful risk controls.
+Never assume global Studio, customer, tenant, session, or authorization state.
 
-Do not rely only on IP address or device fingerprinting.
-
-Account history, session behavior, creation/redemption velocity, payment
-relationships, abuse history, and other appropriate signals may contribute
-to risk decisions.
-
-Design for shared computers, privacy, false positives, and appeals/recovery.
-
-Risk controls must be adjustable and auditable.
+Every operation must resolve and enforce the intended identity/context. Cross-Studio and cross-tenant access must fail closed and be auditable.
 
 ---
 
-## 14. Production Source / IP Protection
+## 32. Red-Team Baseline
 
-Production deployments must protect MYNO source/IP and customer data.
-
-Never place provider master secrets, payment secrets, database credentials,
-or admin secrets in desktop/client code.
-
-Required production direction includes:
-
-- least privilege
-- secret rotation
-- dependency/supply-chain security
-- secure build/release
-- controlled source maps/artifacts
-- no debug backdoors
-- environment separation
-- secure update mechanism
-- production access auditability
-
----
-
-## 15. Git Safety
-
-Never blindly execute:
-
-- `git add .`
-- `git reset --hard`
-- `git clean`
-- mass deletion
-- mass overwrite
-
-Before committing or preparing a change:
-
-- inspect status
-- inspect diff
-- inspect changed filenames
-- inspect staged changes
-- check for secrets
-- confirm logical scope
-
-Never push unless explicitly requested by the user.
-
----
-
-## 16. Testing Requirements
-
-Use the appropriate evidence for the change, including when applicable:
-
-- unit tests
-- integration tests
-- E2E tests
-- runtime tests
-- architecture tests
-- regression tests
-- adversarial/security tests
-- load/concurrency tests
-- payment/credit integrity tests
-- recovery/restore tests
-- production-like tests
-
-Tests are evidence, not the goal.
-
-Do not weaken tests to make the suite pass.
-
-Do not call a gate passed without evidence for that gate.
-
----
-
-## 17. Canonical Red-Team Requirement
-
-The P3.6-RT security registry is the canonical minimum baseline.
-
-It covers, at minimum:
+The canonical minimum P3.6-RT registry is:
 
 1. direct prompt injection
 2. indirect prompt injection
@@ -398,388 +675,119 @@ It covers, at minimum:
 29. deployment/update abuse
 30. emergency-stop/rollback bypass
 
-Older reports with different vector counts must be reconciled into this
-registry rather than treated as a separate standard.
-
-Red-team loop:
+Loop:
 
 `REPRODUCE → CLASSIFY → FIX → TEST → RE-ATTACK → PASS/BLOCK`
 
 ---
 
-## 18. Production / Beta Gates
+## 33. Release, Migration, and Recovery
 
-Do not treat Beta as a technical preview.
+Production changes should support, as applicable:
 
-Before real customer Beta, the project must satisfy the documented gates for:
+- versioned releases
+- staging
+- release candidates
+- compatibility checks
+- migrations
+- canary/controlled rollout
+- health checks
+- post-release verification
+- hotfixes
+- rollback
+- disaster recovery
+- backup/restore drills
+- incident response
+- emergency shutdown
 
-### Engineering
-- LEI/Luau mastery evaluation
-- Roblox architecture
-- placement
-- dependencies
-- runtime execution
-- autonomous debugging
-- regression
-- performance
-- multiplayer/replication
-- real E2E
-
-### Security
-- full-project red team
-- injection/tool abuse
-- traversal/secret leakage
-- authorization and privilege boundaries
-- Studio/tenant isolation
-- resource exhaustion
-- destructive controls
-- emergency stop
-- rollback/recovery
-- payment/credit/account abuse
-- supply chain
-
-### Product
-- website
-- end-user program
-- onboarding
-- dashboard
-- authentication
-- UX/error recovery
-- support
-- usage/credits
-- payment
-- provider failover
-- telemetry/diagnostics
-- complete admin control plane
-
-### Infrastructure / Scale
-- many simultaneous users
-- burst and sustained load
-- concurrent jobs
-- provider degradation
-- database/cache pressure
-- rate limits
-- queue/backlog behavior
-- recovery
-- deployment/rollback
-
-### Economy
-- real purchases
-- real provider/infrastructure costs
-- legitimate free-tier optimization
-- unit economics
-- revenue/margin measurement
-
-### Customer Safety
-- deterministic dangerous-operation boundaries
-- no uncontrolled destructive mutations
-- audit trail
-- recoverability
-- backup/version strategy
+Rollback must include data/schema compatibility, not only code deployment.
 
 ---
 
-## 19. Beta Economics Rule
+## 34. Feature Flags and Experiments
 
-During Beta, optimize legitimate free-tier/provider usage where it improves
-unit economics without degrading customer experience or system integrity.
+Feature flags and experiments must be:
 
-Never trade away:
+- deterministic where required
+- scoped
+- auditable
+- reversible
+- tenant/customer aware
+- safe for persistence and migrations
 
-- performance
-- reliability
-- security
-- data integrity
-- payment/credit integrity
-- tenant isolation
-- recoverability
-
-Free tiers are an economic optimization layer, not the sole reliability
-foundation.
-
-Monitor quotas and health, route intelligently, and retain paid fallback.
-
-Track revenue, provider cost, infrastructure cost, payment fees, support
-cost, gross margin, cost per task, and cost per active customer.
-
-No deceptive degradation or hidden performance penalty is allowed.
+Do not leave permanent hidden branches without ownership and cleanup plans.
 
 ---
 
-## 20. Admin Control Plane
+## 35. Admin Control Plane
 
-Production admin tooling must be least-privilege and fully auditable.
+Production admin tooling should be least-privilege and auditable and may eventually manage, as authorized:
 
-It should eventually control, as authorized:
+users, tenants, sessions, credits/ledger, purchases, refunds, chargebacks, usage, provider health/quotas/costs, infrastructure health, security events, abuse/risk, rate limits, feature flags, emergency stop, incidents, audit logs, support, and controlled emergency operations.
 
-- users
-- tenants
-- sessions
-- credits/ledger
-- purchases
-- refunds
-- chargebacks
-- usage
-- provider health/quotas/costs
-- infrastructure health
-- security events
-- abuse/risk
-- rate limits
-- feature flags
-- emergency stop
-- incidents
-- audit logs
-- support
-- controlled emergency operations
+Emergency operations must themselves be authenticated, authorized, logged, and recoverable.
 
 ---
 
-## 21. Project Memory Synchronization
+## 36. Customer Beta Gates
 
-When a major architectural decision or project-state milestone changes:
+Beta is a real customer/revenue test, not a technical preview.
 
-1. Update `MYNO_PROJECT_MEMORY.md`.
-2. Record what changed.
-3. Record why it changed.
-4. Record the old assumption when relevant.
-5. Record the new invariant.
-6. Keep this file consistent with the memory.
+Before customer Beta, evidence must cover engineering, security, product, infrastructure/scale, economy, and customer safety.
 
-Never silently allow implementation, roadmap, and project memory to diverge.
+Required direction includes many simultaneous users, burst/sustained load, provider degradation, database/cache pressure, queues, recovery, real purchases, real cost measurement, free-tier optimization without deceptive degradation, full security/red-team coverage, tenant isolation, observability, support, dashboard, authentication, admin controls, backup/restore, and rollback.
+
+Beta ladder:
+
+`INTERNAL ALPHA → PRIVATE BETA → LIMITED CUSTOMER BETA → LIVE CUSTOMER BETA → STABILIZATION → PUBLIC RELEASE DECISION`
 
 ---
 
-## 22. Final Agent Principle
+## 37. Git Safety
 
-The goal is not to produce the most code.
+Never blindly run:
 
-The goal is to produce correct, secure, maintainable, verifiable engineering
-that moves MYNO through its roadmap without skipping gates.
+- `git add .`
+- `git reset --hard`
+- `git clean`
+- mass deletion
+- mass overwrite
+
+Before commit/review:
+
+- inspect status
+- inspect diff
+- inspect filenames
+- inspect staged changes
+- check for secrets
+- confirm scope
+
+Never push unless explicitly requested.
+
+---
+
+## 38. Project Memory Synchronization
+
+When a major architectural decision, roadmap milestone, invariant, or project-state change occurs:
+
+1. update `MYNO_PROJECT_MEMORY.md`
+2. record what changed
+3. record why
+4. record the old assumption when relevant
+5. record the new invariant
+6. keep this file consistent with the memory
+
+Never allow implementation, roadmap, and memory to silently diverge.
+
+---
+
+## 39. Final Principle
+
+The goal is not maximum code.
+
+The goal is correct, secure, maintainable, observable, verifiable, recoverable engineering that moves MYNO through its roadmap without skipping gates and remains adaptable as technology changes.
 
 When evidence is missing, say so.
 When a design is unsafe, say so.
-When a request conflicts with the architecture, say so.
+When a capability is unavailable, say so.
 When a gate is not passed, do not pretend it is.
-
----
-
-## 23. Experience-Complete Building Rules
-
-MYNO's long-term target includes complete Roblox Experience creation, not
-only code generation. When a task concerns a player-facing game, agents must
-consider the applicable design, creative, gameplay, validation, and release
-layers in addition to technical implementation.
-
-The canonical transformation is:
-
-`PLAYER/OWNER INTENT → GAME DESIGN → SYSTEM DESIGN → ARCHITECTURE → CONTENT → IMPLEMENTATION → PLAYTEST → CRITIQUE → POLISH → VERIFY → RELEASE`
-
-Do not silently substitute the agent's preferred game design for the user's
-creative intent. Surface meaningful conflicts and obtain authorization when
-a creative tradeoff materially changes the requested product.
-
----
-
-## 24. Game Design Intelligence
-
-For applicable full-game requests, reason about:
-
-- core fantasy
-- core gameplay loop
-- player motivation
-- onboarding
-- progression
-- difficulty
-- rewards
-- quests/missions
-- economy
-- social interaction
-- replayability
-- content pacing
-- session structure
-- retention risks
-- monetization
-- player clarity/friction
-
-A technically correct implementation is not evidence of a good game.
-
----
-
-## 25. Creative / Visual / Taste Quality
-
-For player-facing output, MYNO should evaluate applicable:
-
-- composition
-- visual hierarchy
-- lighting
-- color harmony
-- material consistency
-- scale consistency
-- prop density
-- landmarks
-- navigation/readability
-- focal points
-- repetition/dead space
-- UI hierarchy
-- animation feel
-- VFX readability
-- audio feedback
-- environmental storytelling
-
-Where supported, use an iterative evidence loop:
-
-`BUILD → CAPTURE → CRITIQUE → REPAIR → RE-CAPTURE → COMPARE → POLISH`
-
-Functional does not mean finished.
-
-Applicable quality passes are:
-
-`Functional → Correct → Consistent → Readable → Polished → Immersive → Professional`
-
----
-
-## 26. Autonomous Player / Simulation Rules
-
-The long-term autonomous validation target includes controlled synthetic
-players that can exercise a game through real inputs and observations.
-
-They may evaluate onboarding, navigation, objectives, interaction,
-progression, failure/recovery, UI clarity, rewards, social systems, economy,
-and edge cases.
-
-Synthetic-player evidence does not replace deterministic tests, real runtime
-verification, adversarial testing, or real customer/player evidence.
-
-Where useful, game/economy simulations may evaluate progression, reward
-rates, currency sinks, inflation, rarity, pricing, grind, and monetization
-pressure. Simulation is evidence/hypothesis, not a guarantee of real player
-behavior.
-
----
-
-## 27. Content Factory Rules
-
-MYNO should eventually use reusable content primitives for:
-
-- asset families
-- building families
-- props
-- roads
-- biome variants
-- zones
-- NPC archetypes
-- quest templates
-- item families
-- UI patterns
-- VFX/audio patterns
-
-Generated content must respect project style, gameplay requirements,
-performance budgets, asset/licensing policy, deterministic placement, and
-ownership rules. Do not create uncontrolled duplication merely to increase
-content volume.
-
----
-
-## 28. Full Lifecycle / LiveOps Rules
-
-Publishing is not the end of the engineering lifecycle.
-
-The long-term lifecycle is:
-
-`IDEA → DESIGN → PROTOTYPE → VERTICAL SLICE → PRODUCTION → CONTENT EXPANSION → QA → OPTIMIZATION → SECURITY → RELEASE CANDIDATE → PUBLISH → POST-PUBLISH VERIFY → LIVE MONITORING → LEARN → UPDATE → LIVEOPS → EVOLVE`
-
-Release operations must eventually support applicable:
-
-- versioning
-- release candidates
-- staging
-- controlled rollout
-- publish validation
-- post-publish health checks
-- compatibility/migration checks
-- incident response
-- hotfixes
-- rollback
-- emergency shutdown
-- change tracking
-
-A successful publish operation alone does not prove a healthy release.
-
-Post-release automation remains subject to authorization, policy, budgets,
-verification, audit, rollback/recovery, and emergency-stop controls.
-
----
-
-## 29. Definition of Done
-
-Never reduce completion to a single `done` flag.
-
-Use scope-aware states:
-
-- **BUILT** — artifacts/mutations were produced.
-- **VERIFIED** — required technical/runtime evidence confirms defined behavior.
-- **POLISHED** — applicable player-facing quality criteria passed.
-- **RELEASE-CANDIDATE** — applicable engineering, security, design, QA, and release gates passed.
-- **RELEASED** — intended build was published and post-publish checks passed.
-- **SUCCESSFUL** — real-world evidence supports the intended product outcome for the relevant scope.
-- **COMPLETE** — all applicable requirements and gates are satisfied with evidence.
-
-Do not collapse these states. A plan or requirement in memory is not evidence
-that the implementation exists.
-
----
-
-## 30. Evidence and Experience Traceability
-
-For major autonomous work, the long-term architecture should maintain an
-evidence chain:
-
-`REQUIREMENT → DESIGN → ARCHITECTURE → ARTIFACT → MUTATION → TEST → OBSERVATION → VERIFICATION → RELEASE`
-
-Evidence must be freshness/version scoped when applicable.
-
-Agents must be able to distinguish:
-
-- what is intended
-- what was built
-- what was observed
-- what was verified
-- what remains unknown
-
-Player feedback and telemetry are evidence with uncertainty, not absolute
-truth.
-
----
-
-## 31. Creative Engineering Loop
-
-The canonical long-term loop is:
-
-`INTENT → DESIGN → ARCHITECT → BUILD → OBSERVE → PLAY → EVALUATE → CRITIQUE → IMPROVE → VERIFY → POLISH → RELEASE → MEASURE → LEARN → EVOLVE`
-
-This loop extends rather than bypasses the existing security and engineering
-pipeline.
-
-Three truths must remain distinct:
-
-- **Technical truth:** does it work?
-- **Design truth:** does it satisfy the intended design?
-- **Experience truth:** is it good enough for the intended audience?
-
-None automatically proves the others.
-
----
-
-## 32. Final Quality Principle
-
-MYNO should optimize for genuine engineering and player-facing quality,
-not code volume, test-count theater, or impressive-looking demos.
-
-The intended outcome is a system that can eventually take a high-level
-Roblox game goal and, when the required capabilities are actually
-implemented and verified, carry it through design, world/content creation,
-systems, code, UI/UX, animation/VFX/audio, autonomous validation, security,
-performance, polish, release, and post-release evolution.
-
-This is a target architecture and operating standard, not evidence that all
-of these capabilities currently exist.
