@@ -1,5 +1,5 @@
-/**
- * P3.6-D — Context Guard
+﻿/**
+ * P3.6-D â€” Context Guard
  *
  * Runtime validation before context injection into LLM prompt.
  * Prevents invalid, stale, or compromised context from being used.
@@ -65,12 +65,12 @@ export class ContextGuard {
       // generation. The refresh must complete and produce a guard-validated
       // new generation first.
       allowed = false;
-      reasons.push("Scope is refreshing — previous generation must not be injected");
+      reasons.push("Scope is refreshing â€” previous generation must not be injected");
       requiresRefresh = true;
     } else if (runtimeContext.scope && runtimeContext.scope.lifecycleState === "validating") {
       // FAIL CLOSED: scope only becomes active after the guard passes.
       allowed = false;
-      reasons.push("Scope is validating — not yet activatable");
+      reasons.push("Scope is validating â€” not yet activatable");
       requiresRefresh = true;
     }
 
@@ -103,7 +103,7 @@ export class ContextGuard {
       warnings.push(`Stage mismatch: scope at ${runtimeContext.scope.currentStage}, context for ${runtimeContext.stage}`);
     }
 
-    // 7. Security-critical evidence required (BLOCKER #22 — FAIL CLOSED).
+    // 7. Security-critical evidence required (BLOCKER #22 â€” FAIL CLOSED).
     //    When lifecycle assembly marked the context security-required but no
     //    valid security-critical evidence is present, the context is DENIED:
     //    a security-required context without security evidence never reaches
@@ -221,75 +221,3 @@ export function isCriticalFailure(result: ContextGuardResult): boolean {
   );
 }
 
-/* ============================================================================
- * SCOPE-LEVEL GUARD
- * ========================================================================== */
-
-/**
- * Validate a scope directly (before assembly).
- */
-export function validateScope(scope: ContextScope): ContextGuardResult {
-  const reasons: string[] = [];
-  const warnings: string[] = [];
-
-  if (scope.lifecycleState === "invalidated") {
-    return createGuardResult(false, "Scope is invalidated");
-  }
-
-  if (scope.lifecycleState === "failed") {
-    return createGuardResult(false, "Scope has failed");
-  }
-
-  if (scope.evidenceIds.length === 0) {
-    warnings.push("Scope has no evidence");
-  }
-
-  if (!scope.snapshotId) {
-    warnings.push("Scope has no snapshot");
-  }
-
-  if (!scope.assemblyHash) {
-    warnings.push("Scope has no assembly hash");
-  }
-
-  return createGuardResult(true, "", { warnings });
-}
-
-/* ============================================================================
- * ASSEMBLY-LEVEL GUARD
- * ========================================================================== */
-
-/**
- * Validate an assembled context before use.
- */
-export function validateAssembly(
-  assembly: string,
-  expectedHash: string,
-): ContextGuardResult {
-  if (!assembly || assembly.trim().length === 0) {
-    return createGuardResult(false, "Assembly is empty");
-  }
-
-  // Quick integrity check
-  let hash = 0;
-  for (let i = 0; i < assembly.length; i++) {
-    const char = assembly.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
-  const computedHash = `asm-${Math.abs(hash).toString(16)}`;
-
-  if (computedHash !== expectedHash) {
-    return createGuardResult(false, `Assembly integrity check failed: ${computedHash} !== ${expectedHash}`);
-  }
-
-  // Check for required sections
-  const requiredSections = ["<MYNO_CONTEXT>", "</MYNO_CONTEXT>"];
-  for (const section of requiredSections) {
-    if (!assembly.includes(section)) {
-      return createGuardResult(false, `Missing required section: ${section}`);
-    }
-  }
-
-  return createGuardResult(true, "");
-}

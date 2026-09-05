@@ -70,7 +70,6 @@ import {
   CheckpointEvaluator,
   ContextGuard,
   TrustBoundaryEnforcer,
-  ContextInvalidator,
   SecurityContextInvalidator,
   type RuntimeContext,
   type ContextScope,
@@ -127,6 +126,7 @@ import {
 import {
   VERIFICATION_USER_PROMPT,
   buildVerificationPrompt,
+  renderEstablishedEvidence,
 } from "./agent/verify-prompt.js";
 import {
   applyPlacementHints,
@@ -561,11 +561,6 @@ interface AgentState {
   contextGuard?: ContextGuard;
 
   /**
-   * P3.6-D: Context invalidator for mutation/execution-based invalidation.
-   */
-  contextInvalidator?: ContextInvalidator;
-
-  /**
    * P3.6-D: Context isolation manager (cross-scope/task isolation).
    */
   contextIsolation?: ContextIsolationManager;
@@ -783,9 +778,6 @@ export class Agent {
         requireIntegrityHash: true,
       });
 
-      // Initialize ContextInvalidator for mutation/execution-based invalidation
-      state.contextInvalidator = new ContextInvalidator();
-
       // P3.6-D: Isolation manager + activation service.
       state.contextIsolation = new ContextIsolationManager();
 
@@ -939,9 +931,15 @@ export class Agent {
               task.id,
               state.contextScope!.scopeId,
             );
+            // BLOCKER #29 remediation: bind the scope to its FULL collected
+            // evidence pool (not just the initially selected subset) so a
+            // later refresh selection remains owned by the scope. The strict
+            // activation verify gate only ever sees owned evidence.
             state.contextIsolation?.registerEvidence(
               state.contextScope!.scopeId,
-              [...runtimeContext.evidenceIds],
+              state.contextCollection?.evidence.map(
+                (evidence) => evidence.id,
+              ) ?? [],
             );
 
             // Clear DecisionContext since we now use ContextAssembly
@@ -2357,25 +2355,37 @@ private createInitialPlan(
       contextCollection,
     } = state;
 
-    // No lifecycle assets → normally nothing to guard. BUT (BLOCKER #22)
-    // if a context flow was actually required — a collection exists, a
-    // security-designated collector failed, or security evidence was
-    // expected — the absence of lifecycle assets is a FAILED activation.
-    // Returns true ONLY when there is genuinely no context to guard.
-    if (!contextLifecycle || !contextScope) {
-      if (
-        contextCollection !== undefined ||
-        state.contextSecurity?.securityCollectionFailed === true ||
-        (state.contextSecurity?.expectedSecurityCriticalCount ?? 0) > 0
-      ) {
-        this.fail(
-          state,
-          "Context security guard: lifecycle assets missing while a context flow is required.",
-          false,
-        );
-        return false;
-      }
+    // BLOCKER #29 (P3.6 remediation): decide whether a context flow is
+    // actually required from CONCRETE SIGNALS of context flow — a
+    // collection was produced or security evidence was demanded — NOT from
+    // the presence of lifecycle assets. Lifecycle assets are created
+    // unconditionally at init, so a chat/local-file/terminal task (which
+    // never collects a context) would otherwise be denied forever.
+    const securityRequirement =
+      state.contextSecurity?.securityCollectionFailed === true ||
+      (state.contextSecurity?.expectedSecurityCriticalCount ?? 0) > 0;
+
+    // CASE A — genuinely context-free: no collection, no runtime context,
+    // no security requirement. Nothing to guard; no model-call gate.
+    if (
+      contextCollection === undefined &&
+      state.runtimeContext === undefined &&
+      !securityRequirement
+    ) {
       return true;
+    }
+
+    // CASE F — a context flow was required (a collection exists or
+    // security evidence was expected) but the lifecycle shell is missing.
+    // That is a FAILED activation: never run a model call on a context
+    // that bypassed the guard.
+    if (!contextLifecycle || !contextScope) {
+      this.fail(
+        state,
+        "Context security guard: lifecycle assets missing while a context flow is required.",
+        false,
+      );
+      return false;
     }
 
     const scope = contextLifecycle.getScope(
@@ -3022,7 +3032,6 @@ private createInitialPlan(
         // Uses explicit ToolExecutionEffects: unknown mutations are
         // conservatively invalidating (never treated as "no mutation").
         if (
-          state.contextInvalidator &&
           state.contextScope &&
           state.contextLifecycle
         ) {
@@ -3718,25 +3727,19 @@ Switch to diagnosis:
                 state.plan
                   .successCriteria,
 
-              establishedEvidence:
-                state.executedTools.filter(
-                  (execution) =>
-                    execution
-                      .success,
-                ).length > 0
-                  ? state.executedTools
-                      .filter(
-                        (execution) =>
-                          execution.success,
-                      )
-                      .map(
-                        (execution) =>
-                          `- ${execution.name} → ${this.summarizeEvidence(
-                            execution.data,
-                          )}`,
-                      )
-                      .join("\n")
-                  : "(no successful tool calls yet)",
+              establishedEvidence: renderEstablishedEvidence(
+                  state.executedTools
+                    .filter(
+                      (execution) =>
+                        execution.success,
+                    )
+                    .map((execution) => ({
+                      name: execution.name,
+                      summary: this.summarizeEvidence(
+                        execution.data,
+                      ),
+                    })),
+                ),
 
               expectedLayoutInstruction:
                 state.plan.placement

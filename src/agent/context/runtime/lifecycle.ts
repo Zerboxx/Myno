@@ -1,5 +1,5 @@
-/**
- * P3.6-D — Context Lifecycle Management
+﻿/**
+ * P3.6-D â€” Context Lifecycle Management
  *
  * Manages the complete lifecycle of context from creation to finalization.
  * Integrates with P3.6-A/B/C without modifying their contracts.
@@ -219,7 +219,7 @@ export class ContextLifecycleManager {
     const scope = this.scopes.get(input.scopeId);
     if (!scope) throw new Error(`Scope not found: ${input.scopeId}`);
 
-    // BLOCKER #23: exact task identity — a scope may only assemble a
+    // BLOCKER #23: exact task identity â€” a scope may only assemble a
     // collection produced by ITS task. Enforced at the single assembly
     // point, regardless of which caller reached it.
     if (scope.taskId !== input.collection.metadata.taskId) {
@@ -353,58 +353,6 @@ export class ContextLifecycleManager {
   }
 
   /* ============================================================================
-   * STAGE TRANSITION
-   * ============================================================================ */
-
-  /**
-   * Transition context to a new stage.
-   * Re-assembles if needed.
-   */
-  async transitionStage(input: {
-    scopeId: ContextScopeId;
-    newStage: ContextSelectionStage;
-    collection: any;
-    selection: ContextSelectionResult;
-    projectFingerprint?: string;
-  }): Promise<RuntimeContext> {
-    const scope = this.scopes.get(input.scopeId);
-    if (!scope) throw new Error(`Scope not found: ${input.scopeId}`);
-
-    const oldRuntime = this.runtimeContexts.get(input.scopeId);
-    if (oldRuntime) {
-      oldRuntime.status = "superseded";
-    }
-
-    // Re-assemble for new stage
-    const runtimeContext = await this.assembleForStage({
-      scopeId: input.scopeId,
-      collection: input.collection,
-      selection: input.selection,
-      stage: input.newStage,
-      projectFingerprint: input.projectFingerprint,
-    });
-
-    scope.currentStage = input.newStage;
-    scope.generation++;
-    scope.evidenceIds = Object.freeze([...input.selection.selected.map(s => s.evidenceId)]);
-
-    const metrics = this.metrics.get(input.scopeId);
-    if (metrics) {
-      metrics.generations = scope.generation;
-    }
-
-    this.recordAuditEvent(input.scopeId, scope.taskId, scope.generation, "checkpoint", {
-      stage: input.newStage,
-      previousGeneration: scope.generation - 1,
-    });
-
-    // Self-contained transition: validate + activate immediately.
-    this.completeRefresh(input.scopeId);
-
-    return runtimeContext;
-  }
-
-  /* ============================================================================
    * FINALIZATION
    * ============================================================================ */
 
@@ -526,7 +474,7 @@ export class ContextLifecycleManager {
 
   /**
    * Mark refresh as complete.
-   * The scope becomes ACTIVE only here — after guard validation.
+   * The scope becomes ACTIVE only here â€” after guard validation.
    */
   completeRefresh(scopeId: ContextScopeId): void {
     const scope = this.scopes.get(scopeId);
@@ -701,22 +649,3 @@ export class ContextLifecycleManager {
   }
 }
 
-/* ============================================================================
- * STANDALONE FUNCTION EXPORTS
- * ========================================================================== */
-
-export const scopes = new Map<ContextScopeId, ContextScope>();
-
-export function createScope(input: {
-  taskId: string;
-  parentScopeId?: ContextScopeId;
-  projectId?: string;
-}): ContextScope {
-  const manager = new ContextLifecycleManager();
-  return manager.createScope(input);
-}
-
-export function getScope(scopeId: ContextScopeId): ContextScope | undefined {
-  const manager = new ContextLifecycleManager();
-  return manager.getScope(scopeId);
-}

@@ -18,6 +18,7 @@ import type {
   ProgressiveDisclosureMetadata,
 } from "./types.js";
 import { getDeduplicationGroups } from "./collection.js";
+import { isTrustAllowedFor } from "./runtime/isolation.js";
 
 /* ============================================================================
  * ASSEMBLY SECTIONS
@@ -173,25 +174,32 @@ function buildUncertaintySection(
 ): string | null {
   const items: string[] = [];
 
-  // Dropped evidence with reasons
+  // Dropped evidence with reasons. METADATA ONLY — dropped evidence is
+  // never exposed in the model-visible assembly, and outside the
+  // instruction trust allowlist ("system"/"project-data") it is omitted
+  // entirely so a hostile external note inspected by a collector can
+  // never echo itself into the instruction context.
   for (const dropped of selection.dropped) {
     const ev = evidenceMap.get(dropped.evidenceId);
     if (!ev) continue;
-    items.push(`DROPPED [${dropped.reason}]: ${ev.kind} from ${ev.source.sourceName} (${truncate(renderContent(ev.content, "reference"), 100)})`);
+    if (!isTrustAllowedFor(ev.trustLevel, "instruction")) continue;
+    items.push(`DROPPED [${dropped.reason}]: ${ev.kind} from ${ev.source.sourceName} (trust: ${ev.trustLevel})`);
   }
 
-  // Deferred evidence
+  // Deferred evidence. METADATA ONLY — never the content.
   for (const deferredId of selection.deferred) {
     const ev = evidenceMap.get(deferredId);
     if (!ev) continue;
-    items.push(`DEFERRED: ${ev.kind} from ${ev.source.sourceName} (${truncate(renderContent(ev.content, "reference"), 100)})`);
+    if (!isTrustAllowedFor(ev.trustLevel, "instruction")) continue;
+    items.push(`DEFERRED: ${ev.kind} from ${ev.source.sourceName} (trust: ${ev.trustLevel})`);
   }
 
-  // Low confidence
+  // Low confidence. METADATA ONLY (already content-free).
   for (const sel of selection.selected) {
     const ev = evidenceMap.get(sel.evidenceId);
     if (!ev) continue;
     if (ev.confidence === "unknown" || (typeof ev.confidence === "number" && ev.confidence < 0.5)) {
+      if (!isTrustAllowedFor(ev.trustLevel, "instruction")) continue;
       items.push(`LOW CONFIDENCE: ${ev.kind} from ${ev.source.sourceName} (confidence: ${ev.confidence === "unknown" ? "unknown" : ev.confidence})`);
     }
   }
@@ -204,6 +212,9 @@ function buildUncertaintySection(
 function buildDeferredSection(references: ContextReference[]): string | null {
   if (references.length === 0) return null;
 
+  // References carry a METADATA-ONLY summary (kind + source) produced by
+  // progressive disclosure — never raw content — so a deferred entry can
+  // inform the model about existence without leaking the content itself.
   const items = references.map(ref =>
     `[${ref.kind}] ${ref.summary} (deferred: ${ref.reasonDeferred})`
   );

@@ -100,8 +100,6 @@ export {
   createGuardResult,
   combineGuardResults,
   isCriticalFailure,
-  validateScope,
-  validateAssembly,
 } from "./guard.js";
 
 // Security-Evidence Policy (BLOCKER #22)
@@ -111,8 +109,6 @@ export {
   countSecurityCriticalEvidence,
   countInvalidSecurityCriticalEvidence,
   isSecurityCollectorFailure,
-  computeSecurityEvidenceExpectation,
-  type SecurityEvidenceExpectation,
 } from "./security-evidence-policy.js";
 
 // Recovery
@@ -120,8 +116,4 @@ export {
   RecoveryContextIntegrator,
   recoveryStateToCheckpoint,
   getRecoveryCheckpointReason,
-  extractRecoveryContext,
-  type RecoveryContextPolicy,
-  DEFAULT_RECOVERY_CONTEXT_POLICY,
-  applyRecoveryContextPolicy,
 } from "./recovery.js";

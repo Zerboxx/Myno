@@ -97,6 +97,13 @@ export class ContextIsolationManager {
    * DENY-BY-DEFAULT check run at the activation boundary BEFORE assembly.
    * Verifies the canonical scope→task binding and evidence→scope
    * ownership for every evidence ID that is about to enter the context.
+   *
+   * BLOCKER #29 REGRESSION-HARDENING: STRICT — there is NO first-touch
+   * binding. A scope that was never explicitly registered, or an evidence
+   * ID that was never registered to the requesting scope, is DECLINED.
+   * Registration only ever happens on the trusted activation path (or the
+   * agent's initial pipeline registration); this verification path never
+   * silently binds.
    */
   verifyEvidenceAccess(input: {
     taskId: string;
@@ -106,7 +113,9 @@ export class ContextIsolationManager {
     const reasons: string[] = [];
 
     const boundTask = this.scopeToTask.get(input.scopeId);
-    if (boundTask !== undefined && boundTask !== input.taskId) {
+    if (boundTask === undefined) {
+      reasons.push("scope-not-registered");
+    } else if (boundTask !== input.taskId) {
       return {
         allowed: false,
         reasons: ["scope-bound-to-different-task"],
@@ -115,7 +124,9 @@ export class ContextIsolationManager {
 
     for (const id of input.evidenceIds) {
       const owner = this.evidenceOwner.get(id);
-      if (owner !== undefined && owner !== input.scopeId) {
+      if (owner === undefined) {
+        reasons.push(`evidence-not-registered:${id}`);
+      } else if (owner !== input.scopeId) {
         reasons.push(`evidence-owned-by-other-scope:${id}`);
       }
     }

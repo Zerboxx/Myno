@@ -1,5 +1,5 @@
-/**
- * P3.6-D — Recovery Integration
+﻿/**
+ * P3.6-D â€” Recovery Integration
  *
  * Integrates context lifecycle with P3.4 recovery system.
  * Recovery can invalidate assumptions and trigger context refresh.
@@ -115,14 +115,14 @@ export class RecoveryContextIntegrator {
       };
     }
 
-    // No heuristic fired — STILL invalidate (FINDING #14): a recovery
+    // No heuristic fired â€” STILL invalidate (FINDING #14): a recovery
     // with no recognized matching evidence would otherwise silently keep
     // the pre-recovery context. Deterministic boundary invalidation.
     return {
       invalidateContext: true,
       invalidationReason: "recovery-invalidated",
       targetedRefresh: true,
-      reasons: ["Recovery boundary reached — context invalidated deterministically"],
+      reasons: ["Recovery boundary reached â€” context invalidated deterministically"],
     };
   }
 
@@ -311,108 +311,3 @@ export function getRecoveryCheckpointReason(
   return "explicit";
 }
 
-/* ============================================================================
- * CONTEXT-AWARE RECOVERY HELPERS
- * ========================================================================== */
-
-/**
- * Extract context-relevant information from recovery state.
- */
-export function extractRecoveryContext(input: {
-  error: Error;
-  recoveryAttempt: number;
-  maxRecoveryAttempts: number;
-}): {
-  isRepeatedFailure: boolean;
-  failureCategory: string;
-  shouldEscalate: boolean;
-} {
-  const { error, recoveryAttempt, maxRecoveryAttempts } = input;
-
-  const isRepeatedFailure = recoveryAttempt > 1;
-  const failureCategory = categorizeError(error);
-  const shouldEscalate = recoveryAttempt >= maxRecoveryAttempts - 1;
-
-  return { isRepeatedFailure, failureCategory, shouldEscalate };
-}
-
-/**
- * Categorize error for context handling.
- */
-function categorizeError(error: Error): string {
-  const message = error.message.toLowerCase();
-
-  if (message.includes("permission") || message.includes("unauthorized")) return "security";
-  if (message.includes("validation") || message.includes("invalid")) return "validation";
-  if (message.includes("not found") || message.includes("undefined") || message.includes("nil")) return "missing-reference";
-  if (message.includes("type") || message.includes("mismatch")) return "type-error";
-  if (message.includes("timeout")) return "timeout";
-  if (message.includes("network") || message.includes("connection")) return "network";
-
-  return "unknown";
-}
-
-/* ============================================================================
- * RECOVERY CONTEXT POLICY
- * ========================================================================== */
-
-/**
- * Policy for context handling during recovery.
- */
-export interface RecoveryContextPolicy {
-  /** Invalidate context on security errors */
-  invalidateOnSecurityError: boolean;
-
-  /** Invalidate context on structural recovery actions */
-  invalidateOnStructuralChange: boolean;
-
-  /** Refresh context on any recovery */
-  refreshOnAnyRecovery: boolean;
-
-  /** Max targeted refresh kinds */
-  maxTargetedKinds: number;
-}
-
-export const DEFAULT_RECOVERY_CONTEXT_POLICY: RecoveryContextPolicy = {
-  invalidateOnSecurityError: true,
-  invalidateOnStructuralChange: true,
-  refreshOnAnyRecovery: false,
-  maxTargetedKinds: 5,
-};
-
-/**
- * Apply recovery context policy.
- */
-export function applyRecoveryContextPolicy(
-  policy: RecoveryContextPolicy,
-  decision: {
-    invalidateContext: boolean;
-    targetedRefresh: boolean;
-    targetKinds?: string[];
-  },
-): {
-  invalidateContext: boolean;
-  targetedRefresh: boolean;
-  targetKinds?: string[];
-} {
-  let { invalidateContext, targetedRefresh, targetKinds } = decision;
-
-  if (!policy.invalidateOnSecurityError && decision.invalidateContext) {
-    // Check if it was security-related - if so, downgrade to refresh
-    // (This is simplified - in reality would check reason)
-    invalidateContext = false;
-    targetedRefresh = true;
-  }
-
-  if (!policy.invalidateOnStructuralChange && decision.invalidateContext) {
-    // Similar downgrade
-    invalidateContext = false;
-    targetedRefresh = true;
-  }
-
-  if (targetKinds && targetKinds.length > policy.maxTargetedKinds) {
-    targetKinds = targetKinds.slice(0, policy.maxTargetedKinds);
-  }
-
-  return { invalidateContext, targetedRefresh, targetKinds };
-}

@@ -252,42 +252,54 @@ export class ContextActivationService {
     };
 
     // ---- 5. BLOCKER #23: isolation enforcement + evidence binding. --------
-    // Enforced in the EXECUTED path, not LLM-prompted: the task binding and
-    // evidence ownership are checked before assembly. First activation binds
-    // the scope→task and evidence→scope mappings; every later activation
-    // verifies them exactly. Cross-task or cross-scope evidence reuse is DENIED.
+    // Enforced in the EXECUTED path, not LLM-prompted. BLOCKER #29
+    // REGRESSION-HARDENING: registration now happens ONLY on this trusted
+    // activation path and verification is strict DENY-BY-DEFAULT with NO
+    // first-touch binding — verifyEvidenceAccess never silently registers.
+    // The FULL collected pool is bound to the scope (not only the current
+    // selection) so a later refresh selection stays owned. Conflicts
+    // (cross-task rebind, cross-scope evidence reuse) fail the scope closed.
+    const denyIsolation = (reasons: string[]): ActivationFailed => {
+      lifecycle.failScope(
+        input.scopeId,
+        `Context activation failed: ${reasons.join(", ")}`,
+      );
+      lifecycle.recordAuditEvent(
+        input.scopeId,
+        input.taskId,
+        scope.generation,
+        "guard-rejected",
+        { reason: "isolation-denied", details: reasons },
+      );
+      return {
+        ok: false,
+        failure: {
+          message: "Context activation failed: isolation check denied",
+          reasons,
+        },
+      };
+    };
+
     if (isolation) {
+      try {
+        isolation.registerScope(input.taskId, input.scopeId);
+      } catch {
+        return denyIsolation(["scope-bound-to-different-task"]);
+      }
+      try {
+        isolation.registerEvidence(input.scopeId, input.evidence.map(e => e.id));
+      } catch {
+        return denyIsolation(["evidence-owned-by-other-scope"]);
+      }
       const isolationResult = isolation.verifyEvidenceAccess({
         taskId: input.taskId,
         scopeId: input.scopeId,
         evidenceIds: trustedSelectionObj.selected.map(s => s.evidenceId),
       });
       if (!isolationResult.allowed) {
-        lifecycle.failScope(
-          input.scopeId,
-          `Context activation failed: ${isolationResult.reasons.join(", ")}`,
-        );
-        lifecycle.recordAuditEvent(
-          input.scopeId,
-          input.taskId,
-          scope.generation,
-          "guard-rejected",
-          { reason: "isolation-denied", details: isolationResult.reasons },
-        );
-        return {
-          ok: false,
-          failure: {
-            message: "Context activation failed: isolation check denied",
-            reasons: isolationResult.reasons,
-          },
-        };
+        return denyIsolation(isolationResult.reasons);
       }
     }
-    isolation?.registerScope(input.taskId, input.scopeId);
-    isolation?.registerEvidence(
-      input.scopeId,
-      trustedSelectionObj.selected.map(s => s.evidenceId),
-    );
 
     // ---- 6. Assemble the NEW generation. -----------------------------------
     // assembleForStage transitions REFRESHING -> VALIDATING. Activity is not

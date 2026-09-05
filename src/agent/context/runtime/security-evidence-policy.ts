@@ -75,44 +75,6 @@ export function countInvalidSecurityCriticalEvidence(
   return evidence.filter(isSecurityCriticalEvidence).length;
 }
 
-export interface SecurityEvidenceExpectation {
-  /**
-   * How many valid security-critical items the task expects, based on
-   * the pre-freshness collected pool (authoritative), plus rejected
-   * invalid ones.
-   */
-  expectedCount: number;
-  /** True when the context MUST contain valid security-critical evidence. */
-  required: boolean;
-  /** True when valid security-critical evidence reached the context. */
-  present: boolean;
-}
-
-/**
- * Compute the deterministic security expectation for a context.
- *
- * `fullCollectedEvidence` is the authoritative pre-freshness pool for
- * the task (what the pipeline actually collected/validated). `assembled`
- * is the evidence that actually survived validation/selection/trust
- * filtering into the assembly. `securityCollectionFailed` permanently
- * marks the context security-required even on later refreshes, so a
- * collector failure is never silently "repaired" back to not-required.
- */
-export function computeSecurityEvidenceExpectation(input: {
-  fullCollectedEvidence: ContextEvidence[];
-  assembled: ContextEvidence[];
-  securityCollectionFailed?: boolean;
-  invalidSecurityCriticalCount?: number;
-}): SecurityEvidenceExpectation {
-  const expectedCount =
-    countSecurityCriticalEvidence(input.fullCollectedEvidence) +
-    (input.invalidSecurityCriticalCount ?? 0);
-  const required =
-    expectedCount > 0 || (input.securityCollectionFailed ?? false);
-  const present = countSecurityCriticalEvidence(input.assembled) > 0;
-  return { expectedCount, required, present };
-}
-
 /**
  * True when a collector failure must mark the context security-required.
  * Only failures of security-designated collectors count — unrelated

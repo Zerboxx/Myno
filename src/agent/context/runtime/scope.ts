@@ -1,5 +1,5 @@
-/**
- * P3.6-D — Context Scope Management
+﻿/**
+ * P3.6-D â€” Context Scope Management
  *
  * Manages context scopes, subtask inheritance, and cross-scope isolation.
  */
@@ -276,40 +276,3 @@ export class ContextScopeManager {
   }
 }
 
-/* ============================================================================
- * STANDALONE FUNCTION EXPORTS
- * ========================================================================== */
-
-export const scopes = new Map<ContextScopeId, ContextScope>();
-
-export function createScope(input: {
-  taskId: string;
-  projectId?: string;
-}): ContextScope {
-  const manager = new ContextScopeManager();
-  return manager.createScope(input);
-}
-
-export function createSubtaskScope(input: {
-  taskId: string;
-  parentScopeId: ContextScopeId;
-  projectId?: string;
-}): ContextScope {
-  const manager = new ContextScopeManager();
-  return manager.createSubtaskScope(input);
-}
-
-export function verifyIsolation(scopeId1: ContextScopeId, scopeId2: ContextScopeId): boolean {
-  const manager = new ContextScopeManager();
-  return manager.verifyIsolation(scopeId1, scopeId2);
-}
-
-export function evaluateReuse(input: ReuseEvaluationInput): "REUSE" | "REUSE_WITH_REFRESH" | "REFERENCE_ONLY" | "REJECT" {
-  const manager = new ContextScopeManager();
-  return manager.evaluateReuse(input);
-}
-
-export function getScope(scopeId: ContextScopeId): ContextScope | undefined {
-  const manager = new ContextScopeManager();
-  return manager.getScope(scopeId);
-}

@@ -40,16 +40,12 @@ export function createReference(input: DeferralInput): ContextReference {
     ? "Present in the runtime pipeline but not exposed to the model in this context."
     : "Not currently loaded into the model context — re-running context collection would be required to include it.";
 
-  // Generate summary based on evidence content
-  let summary: string;
-  if (evidence.content.type === "text") {
-    summary = truncate(evidence.content.value, 120);
-  } else if (evidence.content.type === "structured") {
-    const keys = Object.keys(evidence.content.value).slice(0, 3);
-    summary = `${evidence.kind}: ${keys.join(", ")}`;
-  } else {
-    summary = `${evidence.kind} evidence from ${evidence.source.sourceName}`;
-  }
+  // BLOCKER #29 remediation (trust boundary): summaries are METADATA ONLY
+  // (kind + source). Raw content is never exposed here — deferred evidence
+  // must be able to say "this exists" without leaking its value into the
+  // instruction context.
+  const summary =
+    `${evidence.kind} evidence from ${evidence.source.sourceName}`;
 
   return {
     evidenceId: evidence.id,
@@ -166,10 +162,6 @@ function formatAvailabilityLabel(availability: ContextReference["availability"])
 /* ============================================================================
  * HELPERS
  * ========================================================================== */
-
-function truncate(str: string, maxLen: number): string {
-  return str.length > maxLen ? str.slice(0, maxLen) + "..." : str;
-}
 
 /* ============================================================================
  * PROGRESSIVE DISCLOSURE METADATA FOR ASSEMBLY

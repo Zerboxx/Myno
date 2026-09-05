@@ -329,8 +329,6 @@ export {
   createGuardResult,
   combineGuardResults,
   isCriticalFailure,
-  validateScope,
-  validateAssembly,
 } from "./runtime/guard.js";
 
 // P3.6-D: Recovery Integration
@@ -338,8 +336,4 @@ export {
   RecoveryContextIntegrator,
   recoveryStateToCheckpoint,
   getRecoveryCheckpointReason,
-  extractRecoveryContext,
-  type RecoveryContextPolicy,
-  DEFAULT_RECOVERY_CONTEXT_POLICY,
-  applyRecoveryContextPolicy,
 } from "./runtime/recovery.js";
