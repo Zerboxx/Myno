@@ -17,6 +17,7 @@ export type RobloxInstanceClassName =
   | "Model";
 
 export type ElementRole =
+  | "overhead-player-ui"
   | "server-system"
   | "server-data"
   | "server-command"

@@ -35,6 +35,15 @@ const ROLE_RULES: Record<
   ElementRole,
   RoleRule
 > = {
+  "overhead-player-ui": {
+    root: "StarterPlayer.StarterPlayerScripts",
+
+    className: "LocalScript",
+
+    rule:
+      "Overhead player UI (a name/nametag shown above a character's head via BillboardGui + TextLabel) is CLIENT presentation, not geometry and not a server system. The authoring artifact is a LocalScript in StarterPlayer.StarterPlayerScripts; the BillboardGui/TextLabel are created at RUNTIME on the character's Head. Never create a Part for it.",
+  },
+
   "server-system": {
     root: "ServerScriptService",
 
@@ -201,6 +210,19 @@ interface RoleFeatureGroup {
 
 const ROLE_FEATURES: RoleFeatureGroup[] = [
   {
+    role: "overhead-player-ui",
+
+    patterns: [
+      /\b(name|names?|nametag|name\s?tag|label|labels?)\b[\s\S]{0,80}\b(above|over|on top of|head|heads)\b/i,
+      /\b(above|over)\s+(the|his|her|their|\w+)?\s*head(s)?\b/i,
+      /\b(nametag|name\s?tag|billboardgui|billboard)\b/i,
+      /\b(show|display|print)\b[\s\S]{0,60}\b(name|names?)\b/i,
+      /(اسم|الاسم|الأسم|اسمو|اسمه|لافتة)[\s\S]{0,40}(فوق|الراس|الرأس|راسه|على راسه)/u,
+      /(فوق|الراس|الرأس|راسه|على راسه)[\s\S]{0,40}(اسم|الاسم|الأسم|اسمو|اسمه|لافتة)/u,
+    ],
+  },
+
+  {
     role: "server-data",
 
     patterns: [
@@ -341,6 +363,8 @@ const DEFAULT_ELEMENT_NAMES: Record<
   ElementRole,
   string
 > = {
+  "overhead-player-ui": "PlayerNametag",
+
   "server-system": "GameSystem",
 
   "server-data": "DataService",

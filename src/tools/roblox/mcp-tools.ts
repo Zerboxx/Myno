@@ -3,13 +3,105 @@ import { z } from "zod";
 import type { ToolDefinition } from "../types.js";
 import type { RobloxMCPClient } from "./mcp-client.js";
 
+/**
+ * Known required fields for Roblox MCP tools.
+ * These are fields that the Roblox MCP server requires but may not be marked as required in the schema.
+ */
+const ROBLOX_TOOL_REQUIRED_FIELDS: Record<string, string[]> = {
+  inspect_instance: ["path"],
+  search_game_tree: ["path"],
+  script_read: ["path"],
+  script_search: ["pattern"],
+  script_grep: ["pattern"],
+  multi_edit: ["path", "edits"],
+  execute_luau: ["code"],
+  get_studio_state: [],
+  start_stop_play: ["action"],
+  get_console_output: [],
+  screen_capture: [],
+  character_navigation: ["path", "target"],
+  user_keyboard_input: ["key"],
+  user_mouse_input: ["x", "y"],
+  list_roblox_studios: [],
+  // Building tools
+  create_instance: ["className", "parent"],
+  create_part: ["parent"],
+  create_model: ["parent"],
+  insert_instance: ["className", "parent"],
+  insert_model: ["path"],
+  insert_asset: ["assetId", "parent"],
+  modify_instance: ["path", "properties"],
+  update_instance: ["path", "properties"],
+  set_property: ["path", "property", "value"],
+  generate_procedural: ["type"],
+  generate_mesh: ["meshId", "parent"],
+  generate_material: ["material", "parent"],
+  segment_mesh: ["path", "segments"],
+  create_folder: ["name", "parent"],
+  create_script: ["parent", "source"],
+  create_module: ["parent", "source"],
+  clone_instance: ["path", "parent"],
+  duplicate_instance: ["path", "parent"],
+  rename_instance: ["path", "name"],
+  parent_instance: ["path", "parent"],
+  move_instance: ["path", "parent"],
+};
+
+/**
+ * Patches a tool's input schema to ensure required fields are marked as required.
+ * This addresses the issue where the Roblox MCP server's schema may not mark all required fields.
+ */
+function patchToolSchema(
+  schema: unknown,
+  toolName: string,
+): unknown {
+  if (!schema || typeof schema !== "object") {
+    return schema;
+  }
+
+  const objectSchema = schema as {
+    type?: string;
+    properties?: Record<string, unknown>;
+    required?: string[];
+  };
+
+  if (
+    objectSchema.type !== "object" ||
+    !objectSchema.properties
+  ) {
+    return schema;
+  }
+
+  const knownRequired = ROBLOX_TOOL_REQUIRED_FIELDS[toolName] ?? [];
+  if (knownRequired.length === 0) {
+    return schema;
+  }
+
+  // Merge known required fields with existing required array
+  const existingRequired = new Set(objectSchema.required ?? []);
+  for (const field of knownRequired) {
+    if (objectSchema.properties && field in objectSchema.properties) {
+      existingRequired.add(field);
+    }
+  }
+
+  return {
+    ...objectSchema,
+    required: Array.from(existingRequired),
+  };
+}
+
 function mcpSchemaToZod(
   schema: unknown,
   options?: { optionalStudioId?: boolean },
+  toolName?: string,
 ): z.ZodType {
+  // Patch the schema before converting to Zod if we know the tool name
+  const patchedSchema = toolName ? patchToolSchema(schema, toolName) : schema;
+
   if (
-    !schema ||
-    typeof schema !== "object"
+    !patchedSchema ||
+    typeof patchedSchema !== "object"
   ) {
     return z.record(
       z.string(),
@@ -18,7 +110,7 @@ function mcpSchemaToZod(
   }
 
   const objectSchema =
-    schema as {
+    patchedSchema as {
       type?: string;
       properties?: Record<
         string,
@@ -235,6 +327,7 @@ function createMCPTool(
          */
         optionalStudioId: true,
       },
+      mcpTool.name,
     );
 
   return {

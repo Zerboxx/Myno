@@ -1,6 +1,37 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 
+export function parseMcpArgs(
+  raw: string | undefined,
+): string[] {
+  if (raw === undefined || raw === "") {
+    return defaultMcpArgs();
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed) && parsed.every((x) => typeof x === "string")) {
+      return parsed as string[];
+    }
+  } catch {
+    // fall through to safe default
+  }
+
+  console.warn(
+    "[mcp-client] ROBUX_MCP_ARGS is malformed or not a string array; " +
+      "using the default MCP launcher arguments.",
+  );
+
+  return defaultMcpArgs();
+}
+
+function defaultMcpArgs(): string[] {
+  return [
+    "/c",
+    "cd /d %LOCALAPPDATA%\\Roblox && .\\mcp.bat",
+  ];
+}
+
 export interface RobloxMCPTool {
   name: string;
   description?: string;

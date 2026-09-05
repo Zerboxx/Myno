@@ -9,6 +9,24 @@ import type {
 } from "./providers/provider.js";
 
 import {
+  ProviderError,
+  isRetryableProviderFailure,
+  isTerminalProviderError,
+} from "./provider-domain.js";
+
+import {
+  estimatePayload,
+  payloadTooLargeError,
+  payloadBudgetFromEnv,
+  outputBudgetForStage,
+  trimNonSystemHistory,
+} from "./router/reliability/preflight.js";
+import {
+  selectToolsByStage,
+  type ToolStage,
+} from "./tools/tool-selection.js";
+
+import {
   ModelRouter,
   type ModelCapability,
 } from "./router/model-router.js";
@@ -44,6 +62,9 @@ import {
   type RobloxStudioContext,
   type StudioCandidate,
 } from "./agent/studio-context.js";
+import {
+  isRateLimitCancelledError,
+} from "./router/reliability/rate-limit.js";
 import {
   createIntelligenceOrchestrator,
   type IntelligenceOrchestrator,
@@ -145,10 +166,71 @@ import {
 import type { SecurityArtifact, SecurityReview } from "./agent/security/types.js";
 import type { EnvironmentLayout } from "./agent/placement/types.js";
 import {
+  resolvePlanArtifact,
+  type ArtifactSpec,
+} from "./agent/placement/artifact.js";
+import {
+  normalizeRobloxPathArgs,
+  parseRobloxPath,
+} from "./tools/roblox/paths.js";
+import {
+  validateMutationPlan,
+  isRloxMutationTool,
+} from "./agent/roblox/mutation-plan.js";
+import {
+  artifactContractFor,
+  verifySourceAgainstContract,
+  verifyInspectionAgainstContract,
+  renderSemanticVerification,
+  normalizeInspectedPath,
+} from "./agent/roblox/artifact-contract.js";
+import {
+  authorizeDestructiveAction,
+  type AuthorizationContext,
+  type AuthorizationDecision,
+} from "./agent/roblox/authorization-policy.js";
+import {
   jsonByteSize as measureJsonBytes,
   PerfCollector,
   renderPerfReport,
 } from "./agent/perf.js";
+
+import {
+  EfficiencyTracker,
+  renderEfficiencyScorecard,
+  type ModelCallIntent,
+} from "./agent/efficiency.js";
+import {
+  TaskBudgetTracker,
+  taskBudgetFromEnv,
+  TaskBudgetExhaustedError,
+} from "./agent/budgets.js";
+import {
+  createCancellationManager,
+  type CancellationManager,
+  checkCancellation,
+  DEFAULT_LIMITS,
+  checkAllLimits,
+} from "./agent/cancellation.js";
+import {
+  selectToolsByStageV2,
+  buildKindForGoal,
+  type AgentCapabilityProfile,
+} from "./tools/tool-selection-v2.js";
+import {
+  decideRateLimitRetry,
+} from "./router/reliability/retry-economics.js";
+import {
+  sleepMs,
+} from "./router/reliability/rate-limit.js";
+import {
+  providerTpmLimitFor,
+  TpmAccount,
+} from "./router/reliability/tpm-preflight.js";
+import {
+  callModelPayloadExceedsTpm,
+  type TpmEnforcementDecision,
+} from "./router/reliability/tpm-enforcement.js";
 
 import {
   buildMemoryPrompt,
@@ -165,6 +247,13 @@ import type { MemoryStore } from "./memory/memory-store.js";
 const MAX_ITERATIONS = 32;
 const MAX_TOOL_CALLS_PER_ITERATION = 12;
 const MAX_TOTAL_TOOL_CALLS = 100;
+
+/**
+ * P3.6-S part 2: ceiling on retry-economics backoff. Higher than the
+ * retry-economics default wait ceiling so any wait that gate already accepted
+ * is honored, but never unbounded.
+ */
+const RETRY_MAX_WAIT_MS = 30_000;
 
 const DEFAULT_TEMPERATURE = 0.12;
 
@@ -351,6 +440,17 @@ interface AgentPlan {
   placement?: EnvironmentLayout;
 
   /**
+   * P3.6-S part 2 — deterministic artifact specification for the dominant
+   * Roblox deliverable of this task (produced by the placement engine from
+   * the OBJECTIVE, never from model/map text). When present it drives:
+   *   1. the MutationPlan gate (no presentation intent becomes world
+   *      geometry, no duplicate artifacts, no script-placement violations),
+   *   2. script-placement enforcement beneath tool execution, and
+   *   3. semantic (L2) verification of the live inspected Source.
+   */
+  artifactSpec?: ArtifactSpec;
+
+  /**
    * Deterministic security & server-authority directive derived from the
    * resolved placements (injected into the system prompt + verification
    * prompt). Rendered by ./agent/security/directive.ts.
@@ -468,6 +568,38 @@ interface AgentState {
 
   consecutiveFailures: number;
 
+  /**
+   * P3.6-S part 2 — deterministic retry-reduction state. When retry economics
+   * decides the next attempt must be MATERIALLY SMALLER, `reductionScale`
+   * (0..1) shrinks the stage tool budget in getToolsForPhase so the next
+   * payload carries fewer schemas. It is consumed on the next exposure build.
+   */
+  reductionScale?: number;
+
+  /**
+   * P3.6-S part 2 — bounded provider backoff (ms) whose sleep was already
+   * honored by the retry gate. Recorded only for diagnostics.
+   */
+  retryWaitConsumedMs?: number;
+
+  /**
+   * P3.6-S part 2 — per-task rolling TPM account for the currently active
+   * provider limit. Created lazily when a limit is configured; denies
+   * window-exceeding spend instead of storming the provider.
+   */
+  tpmAccount?: TpmAccount;
+
+  /**
+   * P3.6-S part 2 — per-iteration read cache for RoBloX inspection tools.
+   * Successful read-only Studio calls (list/get/inspect) are replayed within
+   * the SAME iteration so the model stops re-issuing identical discovery
+   * calls against Pro. The cache is cleared the moment any rlox mutation
+   * executes (fresh reads after a write are never served from stale state),
+   * and is scoped to state.iterations.
+   */
+  readCache?: Map<string, ToolResult>;
+  readCacheIteration?: number;
+
   completed: boolean;
 
   failed: boolean;
@@ -480,6 +612,68 @@ interface AgentState {
    * see ensureRobloxStudioContext().
    */
   studioContext: RobloxStudioContext;
+
+  /**
+   * Authoritative model execution record for this task (runtime stabilization
+   * Bug #3). The EFFECTIVE model is what the provider actually served
+   * (response.model), which may differ from the requested/configured model
+   * after capability-aware auto-selection or rate-limit failover. Every log,
+   * the final metadata, and the finished response must use the effective
+   * model — never a stale configured value.
+   */
+  modelUsage?: {
+    requestedModel: string;
+    resolvedModel?: string;
+    effectiveModel?: string;
+    providerId: string;
+    callCount: number;
+    lastAttemptAt?: string;
+    lastErrorCategory?: string;
+    lastRetryable?: boolean;
+    lastRetryAfterMs?: number;
+    lastCooldownUntilMs?: number;
+
+    /**
+     * Preflight-estimated total tokens (messages + tools + output) for the
+     * most recent model call, and whether it was compacted to fit.
+     */
+    lastPreflightTokens?: number;
+    lastPreflightCompacted?: boolean;
+  };
+
+  /**
+   * P3.6-S: per-task token/request observability tracker. Records every model
+   * call with its purpose (ModelCallIntent) and estimated+actual usage, tool
+   * calls, retries, fallbacks, and fully deterministic "calls avoided". The
+   * scorecard is rendered at run end when PERF_LOGGING/MYNO_EFFICIENCY=1.
+   */
+  efficiency?: EfficiencyTracker;
+
+  /**
+   * P3.6-S: hierarchical task budget (token / request / retry envelopes).
+   * Raises TaskBudgetExhaustedError inside callModel when an envelope is
+   * spent; the run loop converts it into a graceful terminal failure instead
+   * of silently iterating or spiraling into retry storms.
+   */
+  taskBudget?: TaskBudgetTracker;
+
+  /**
+   * P3.6-S-CLOSE: Task start time for duration tracking.
+   */
+  taskStartTime?: number;
+
+  /**
+   * P3.6-S-CLOSE: Deterministic emergency stop / cancellation manager.
+   * Manages cooperative cancellation and limit enforcement.
+   */
+  cancellationManager?: CancellationManager;
+
+  /**
+   * P3.6-S: cached preflight token split (tools / output) for the
+   * retry-economics reduction ladder on the next recovery decision.
+   */
+  lastToolSchemaTokens?: number;
+  lastOutputBudget?: number;
 
   /**
    * Persistent project memory recalled for this task (from the memory
@@ -602,6 +796,66 @@ interface ContextSecurityState {
 /* ============================================================================
  * AGENT
  * ========================================================================== */
+
+/** Preflight diagnostics logging toggle (default on, silence with "0"). */
+function estimationLogEnabled(): boolean {
+  return process.env.MYNO_PREFLIGHT_LOG !== "0";
+}
+
+/** Count of non-system messages (helper for the deterministic trim ladder). */
+function estimatePayloadPanicSafe(
+  messages: readonly AIMessage[],
+): number {
+  let count = 0;
+  for (const message of messages) {
+    if (message.role !== "system") {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+/** Maps an agent phase to the stage-aware tool-selection stage. */
+function phaseToToolStage(
+  phase: AgentPhase,
+): ToolStage {
+  switch (phase) {
+    case "understand":
+      return "understand";
+    case "inspect":
+      return "inspect";
+    case "plan":
+      return "plan";
+    case "build":
+      return "build";
+    case "test":
+      return "test";
+    case "debug":
+      return "debug";
+    case "verify":
+      return "verify";
+    case "complete":
+      return "complete";
+    default:
+      return "execute";
+  }
+}
+
+/**
+ * Stage tool budget (estimated tokens) from MYNO_STAGE_TOOL_BUDGET.
+ * Disabled when unset-invalid or explicitly "0". Default 10000 (~40KB of
+ * tool definition text) — deterministic and explained in the report.
+ */
+function stageToolBudgetTokens(): number {
+  const raw = process.env.MYNO_STAGE_TOOL_BUDGET;
+  if (raw === undefined) {
+    return 10000;
+  }
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed >= 1000
+    ? Math.floor(parsed)
+    : 0;
+}
 
 export class Agent {
   private readonly router: ModelRouter;
@@ -739,6 +993,24 @@ export class Agent {
       studioContext: {
         status: "not-needed",
       },
+
+      /*
+       * P3.6-S: token observability + hierarchical task budget. The tracker
+       * is always present (cheap, in-memory); the budget is configured via
+       * env (MYNO_TASK_MAX_*_TOKENS / _MODEL_CALLS / _TOOL_CALLS / _RETRIES)
+       * and is a no-op when no envelope is configured.
+       */
+      efficiency: new EfficiencyTracker(
+        task.id,
+        plan.capability,
+      ),
+
+      taskBudget: new TaskBudgetTracker(
+        taskBudgetFromEnv(),
+      ),
+
+      cancellationManager: createCancellationManager(),
+      taskStartTime: Date.now(),
     };
 
     this.printTaskHeader(state);
@@ -1019,6 +1291,14 @@ export class Agent {
     const contextLength =
       selectedModel.contextLength;
 
+    state.modelUsage = {
+      requestedModel: model,
+      resolvedModel: model,
+      effectiveModel: model,
+      providerId: provider.name,
+      callCount: 0,
+    };
+
     state.messages =
       this.createInitialMessages(state);
 
@@ -1078,8 +1358,12 @@ export class Agent {
         return {
           taskId: task.id,
           content: state.finalContent,
-          model,
+          model: state.modelUsage?.effectiveModel ?? model,
           provider: provider.name,
+          providerId: provider.name,
+          requestedModel: state.modelUsage?.requestedModel ?? model,
+          resolvedModel: state.modelUsage?.resolvedModel ?? state.modelUsage?.effectiveModel ?? model,
+          effectiveModel: state.modelUsage?.effectiveModel ?? model,
           success: false,
         };
       }
@@ -1107,6 +1391,14 @@ export class Agent {
       state.iterations = iteration;
 
       this.printIteration(state);
+
+      // P3.6-S-CLOSE: Deterministic emergency stop check
+      const emergencyStop = this.checkEmergencyStop(state);
+      if (emergencyStop.tripped) {
+        console.error(`[Agent] EMERGENCY STOP: ${emergencyStop.reason}`);
+        this.fail(state, `Emergency stop: ${emergencyStop.reason}`, true);
+        break;
+      }
 
       if (
         state.totalToolCalls >=
@@ -1228,6 +1520,7 @@ export class Agent {
 
         const response =
           await this.callModel(
+            state,
             provider,
             model,
             state.messages,
@@ -1274,6 +1567,7 @@ export class Agent {
           await this.executeToolCalls(
             state,
             limitedCalls,
+            exposedTools,
           );
 
           /*
@@ -1530,6 +1824,86 @@ Continue working toward the user's requested outcome.
           `[Agent] ${state.phase} error: ${message}`,
         );
 
+        /*
+         * P3.6-S: a spent task budget is a graceful terminal state, never a
+         * recoverable error — re-calling into an exhausted envelope is wasted
+         * spend.
+         */
+        if (
+          error instanceof
+          TaskBudgetExhaustedError
+        ) {
+          console.error(
+            `[Agent] ${error.message}`,
+          );
+
+          this.fail(
+            state,
+            `Task budget exhausted: ${error.message}`,
+            true,
+          );
+
+          break;
+        }
+
+        if (
+          isTerminalProviderError(error)
+        ) {
+          console.error(
+            `[Agent] Terminal provider failure (${error instanceof ProviderError ? error.failureClass : "unknown"}); bounded retry policy exhausted — stopping without re-hitting the wire.`,
+          );
+
+          this.fail(
+            state,
+            message,
+            true,
+          );
+
+          break;
+        }
+
+        if (
+          isRateLimitCancelledError(error)
+        ) {
+          console.error(
+            "[Agent] Request cancelled during rate-limit backoff; stopping.",
+          );
+
+          this.fail(
+            state,
+            message,
+            true,
+          );
+
+          break;
+        }
+
+        /*
+         * Deterministic configuration failures (authentication,
+         * invalid_request, model_not_found, provider_unavailable,
+         * context_limit) must NOT be retried: the identical call cannot
+         * succeed. Failing fast here prevents the repeated identical
+         * provider error (e.g. the same 404) that MAX_RECOVERY_ATTEMPTS
+         * used to burn through.
+         */
+        if (
+          !isRetryableProviderFailure(
+            error,
+          )
+        ) {
+          console.error(
+            `[Agent] Non-retryable provider failure (${error instanceof ProviderError ? error.failureClass : "unknown"}); stopping.`,
+          );
+
+          this.fail(
+            state,
+            message,
+            true,
+          );
+
+          break;
+        }
+
         if (
           state.recoveryAttempts >=
           MAX_RECOVERY_ATTEMPTS
@@ -1541,6 +1915,109 @@ Continue working toward the user's requested outcome.
           );
 
           break;
+        }
+
+        /*
+         * P3.6-S: RETRY ECONOMICS GATE — a recovery retry happens only when
+         * it is PROGRESS. For capacity-class failures (rate_limit class, an
+         * observed capacity signal, or an authoritative Retry-After) with no
+         * acceptable wait and no material request reduction available, stop
+         * instead of pushing another recovery re-call into the same
+         * exhausted pool. Transient non-capacity retryables (timeouts, 5xx)
+         * keep the established recovery path untouched.
+         */
+        const capacityClass =
+          error instanceof ProviderError &&
+          (
+            error.failureClass ===
+              "rate_limit" ||
+            error.capacitySignal !==
+              undefined ||
+            error.retryAfterMs !==
+              undefined
+          );
+
+        if (
+          capacityClass &&
+          state.modelUsage
+        ) {
+          const decision =
+            decideRateLimitRetry({
+              provider:
+                provider.name,
+              model,
+              signal:
+                error.capacitySignal,
+              retryAfterMs:
+                error.retryAfterMs,
+              profile: {
+                contextTokens:
+                  Math.max(
+                    0,
+                    (state.modelUsage.lastPreflightTokens ?? 0) -
+                      (state.lastToolSchemaTokens ?? 0),
+                  ),
+                toolTokens:
+                  state.lastToolSchemaTokens ?? 0,
+                outputTokens:
+                  state.lastOutputBudget ?? 0,
+              },
+            });
+
+          state.efficiency?.recordRetry(
+            decision.reduceRequest,
+          );
+
+          state.taskBudget?.recordRetry();
+
+          if (
+            decision.outcome === "stop"
+          ) {
+            console.error(
+              `[Agent] Retry stopped by P3.6-S retry economics: ${decision.reason}`,
+            );
+
+            this.fail(
+              state,
+              `Provider retry stopped (no progress path): ${decision.reason}`,
+              true,
+            );
+
+            break;
+          }
+
+          /*
+           * P3.6-S part 2: CONSUME the retry economics decision. The
+           * reduction is a promise, not a wish — the next tool exposure must
+           * carry materially fewer schemas. The wait is honored as a bounded
+           * backoff before the recovery re-call (capped at the retry gate's
+           * own ceiling so a hostile Retry-After cannot stall the loop).
+           */
+          if (decision.reduceRequest) {
+            state.reductionScale = 0.6;
+
+            console.log(
+              `[Agent] Retry reduced: next model call exposes fewer/smaller tool schemas (scale 0.6).`,
+            );
+          }
+
+          const boundedWaitMs = Math.min(
+            decision.waitMs ?? 0,
+            RETRY_MAX_WAIT_MS,
+          );
+
+          if (boundedWaitMs > 0) {
+            state.retryWaitConsumedMs =
+              boundedWaitMs;
+
+            console.error(
+              `[Agent] Retry backoff: honoring ${boundedWaitMs}ms before the recovery re-call.`,
+            );
+
+            await sleepMs(
+              boundedWaitMs,
+            );
+          }
         }
 
         state.messages.push({
@@ -1627,11 +2104,31 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       );
     }
 
+    /*
+     * P3.6-S: render the token-economy scorecard at run end. Diagnostics only
+     * (never fails a task); printed when PERF_LOGGING=1 or MYNO_EFFICIENCY=1.
+     */
+    if (
+      state.efficiency &&
+      (process.env.PERF_LOGGING === "1" ||
+        process.env.MYNO_EFFICIENCY === "1")
+    ) {
+      console.log(
+        renderEfficiencyScorecard(
+          state.efficiency.scorecard(),
+        ),
+      );
+    }
+
     return {
   taskId: task.id,
   content: state.finalContent,
-  model,
+  model: state.modelUsage?.effectiveModel ?? model,
   provider: provider.name,
+  providerId: provider.name,
+  requestedModel: state.modelUsage?.requestedModel ?? model,
+  resolvedModel: state.modelUsage?.resolvedModel ?? state.modelUsage?.effectiveModel ?? model,
+  effectiveModel: state.modelUsage?.effectiveModel ?? model,
   success: state.completed && !state.failed,
 };
 }
@@ -2112,13 +2609,46 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       );
     }
 
+    /*
+     * P3.6-S part 2: canonicalize every Roblox instance path on its way in.
+     * The model (and placement hints) produce Explorer-style
+     * ("StarterPlayer.StarterPlayerScripts.X"), adapter ("StarterPlayerScripts.X"),
+     * and game-script ("game.Workspace.X") forms; the MCP tools only accept
+     * the single MCP form. Without this normalization, an identical
+     * placement-prefixed call silently targets a nonexistent object unless
+     * every layer happens to agree on a format (the path-format collision).
+     */
+    const group = this.tools.getGroup(toolName);
+
+    const isRobloxGroup =
+      group !== null &&
+      group !== undefined &&
+      group.startsWith("roblox");
+
+    const pathNormalized =
+      isRobloxGroup
+        ? normalizeRobloxPathArgs(
+            hinted.normalized,
+          )
+        : hinted.normalized;
+
+    if (
+      isRobloxGroup &&
+      JSON.stringify(pathNormalized) !==
+        JSON.stringify(hinted.normalized)
+    ) {
+      console.log(
+        `[paths] ${toolName}: instance paths canonicalized to MCP form`,
+      );
+    }
+
     if (
       state.studioContext.status !==
         "resolved" ||
       !state.studioContext.studioId
     ) {
       return {
-        normalized: hinted.normalized,
+        normalized: pathNormalized,
         studioIdInjected: false,
       };
     }
@@ -2128,20 +2658,16 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       this.findStudioDiscoveryToolName()
     ) {
       return {
-        normalized: hinted.normalized,
+        normalized: pathNormalized,
         studioIdInjected: false,
       };
     }
 
-    const group =
-      this.tools.getGroup(toolName);
-
     if (
-      !group ||
-      !group.startsWith("roblox")
+      !isRobloxGroup
     ) {
       return {
-        normalized: hinted.normalized,
+        normalized: pathNormalized,
         studioIdInjected: false,
       };
     }
@@ -2172,7 +2698,7 @@ Continue until the user's requested outcome is actually achieved and verifiable.
       );
 
     return normalizeRobloxToolArguments(
-      hinted.normalized,
+      pathNormalized,
       studioIdKey,
       state.studioContext.studioId,
     );
@@ -2219,6 +2745,34 @@ private createInitialPlan(
           },
         ),
       );
+
+    /*
+     * P3.6-S part 2: resolve the dominant artifact deterministically from the
+     * OBJECTIVE. This is the single source of truth that later prevents the
+     * model from turning presentation intent into world geometry, from
+     * placing a client LocalScript under a server system, and from creating
+     * duplicate artifacts.
+     */
+    if (plan.needsRoblox) {
+      const artifact = resolvePlanArtifact(
+        plan.objective,
+        {
+          requiresBuild:
+            plan.requiresBuild,
+        },
+      );
+
+      plan.artifactSpec = artifact;
+
+      if (
+        process.env.MYNO_EFFICIENCY ===
+        "1"
+      ) {
+        console.log(
+          `[artifact] resolved ${artifact.artifactKind} → ${artifact.displayPath} (${artifact.ruleId})`,
+        );
+      }
+    }
 
     return plan;
   }
@@ -2551,7 +3105,142 @@ private createInitialPlan(
     return true;
   }
 
+  /**
+   * Deterministic preflight for one model call:
+   *  1. estimate full payload (messages + tools + output) vs context + budget;
+   *  2. if over: shrink the output budget to the affordable room, then trim
+   *     the OLDEST non-system history (never system/security instructions);
+   *  3. if still over: throw REQUEST_PAYLOAD_TOO_LARGE (never retried
+   *     unchanged).
+   * Shared by the main loop and the verifier so both paths get identical
+   * budget enforcement.
+   */
+  private prepareModelCall(
+    messages: AIMessage[],
+    tools: AIToolDefinition[],
+    phase: AgentPhase,
+    contextLength?: number,
+  ): {
+    messagesToSend: AIMessage[];
+    outputToUse: number;
+    estimate: ReturnType<typeof estimatePayload>;
+    compacted: boolean;
+  } {
+    const maxOutputTokens =
+      outputBudgetForStage(phase);
+    const budgetTokens =
+      payloadBudgetFromEnv();
+
+    const toolRef =
+      tools.length > 0 ? tools : undefined;
+
+    let messagesToSend = messages;
+    let outputToUse = maxOutputTokens;
+    let compacted = false;
+
+    let estimate = estimatePayload({
+      messages,
+      tools: toolRef,
+      maxOutputTokens,
+      modelContextLimit: contextLength,
+      budgetTokens,
+    });
+
+    const fits = (
+      candidate: ReturnType<typeof estimatePayload>,
+    ): boolean =>
+      candidate.fitsConfiguredBudget &&
+      (candidate.fitsContextWindow ||
+        contextLength === undefined);
+
+    if (!fits(estimate)) {
+      // Step 1: shrink output to the affordable room (never below 64).
+      if (
+        estimate.fitsContextWindow ||
+        contextLength === undefined
+      ) {
+        const maxAffordable =
+          budgetTokens -
+          estimate.inputTokensEstimated;
+
+        if (maxAffordable >= 64) {
+          outputToUse = Math.floor(maxAffordable);
+          compacted = true;
+
+          estimate = estimatePayload({
+            messages,
+            tools: toolRef,
+            maxOutputTokens: outputToUse,
+            modelContextLimit: contextLength,
+            budgetTokens,
+          });
+        }
+      }
+
+      // Step 2: deterministic history trim on the oldest non-system messages.
+      if (!fits(estimate)) {
+        const nonSystemCount =
+          estimatePayloadPanicSafe(
+            messagesToSend,
+          );
+        const keep = Math.max(
+          2,
+          Math.floor(nonSystemCount / 2),
+        );
+
+        if (keep < nonSystemCount) {
+          const before =
+            estimate.totalTokensEstimated;
+
+          messagesToSend =
+            trimNonSystemHistory(
+              messagesToSend,
+              keep,
+            );
+          compacted = true;
+
+          estimate = estimatePayload({
+            messages: messagesToSend,
+            tools: toolRef,
+            maxOutputTokens: outputToUse,
+            modelContextLimit: contextLength,
+            budgetTokens,
+          });
+
+          if (estimationLogEnabled()) {
+            console.log(
+              `[Agent] preflight compaction: history ${nonSystemCount}→${keep} non-system messages, total≈${before}→${estimate.totalTokensEstimated} tokens.`,
+            );
+          }
+        }
+      }
+    }
+
+    // Step 3: honest structured failure — this payload is NEVER retried.
+    if (!fits(estimate)) {
+      if (estimationLogEnabled()) {
+        console.warn(
+          `[Agent] preflight REJECT: tokens≈${estimate.totalTokensEstimated} exceeds budget ${budgetTokens}. ` +
+            estimate.warnings.join(" | "),
+        );
+      }
+
+      throw payloadTooLargeError(
+        estimate,
+        budgetTokens,
+      );
+    }
+
+    return {
+      messagesToSend,
+      outputToUse,
+      estimate,
+      compacted,
+    };
+  }
+
   private async callModel(
+    state: AgentState,
     provider: AIProvider,
     model: string,
     messages: AIMessage[],
@@ -2572,30 +3261,241 @@ private createInitialPlan(
 
     const startedAt = Date.now();
 
-    const response = await provider.chat({
-      model,
+    if (!state.modelUsage) {
+      state.modelUsage = {
+        requestedModel: model,
+        resolvedModel: model,
+        effectiveModel: model,
+        providerId: provider.name,
+        callCount: 0,
+      };
+    }
 
-      messages: modelMessages,
+    state.modelUsage.requestedModel = model;
+    state.modelUsage.providerId = provider.name;
+    state.modelUsage.callCount += 1;
+    state.modelUsage.lastAttemptAt =
+      new Date().toISOString();
 
-      temperature:
-        phase === "verify"
-          ? 0
-          : DEFAULT_TEMPERATURE,
-
-      stream: this.streamingEnabled,
-
+    /*
+     * P3.6-R preflight: BEFORE the provider boundary, estimate the full
+     * payload (messages + tools + output) against the context window and the
+     * safe configured budget, and compact deterministically rather than risk
+     * a provider 413. A payload that cannot fit is failed honestly with
+     * REQUEST_PAYLOAD_TOO_LARGE and is NEVER retried unchanged. Compaction
+     * preserves the leading system/security context (trimNonSystemHistory
+     * never drops system instructions).
+     */
+    const prepared = this.prepareModelCall(
+      modelMessages,
+      tools,
+      phase,
       contextLength,
+    );
 
-      onToken:
-        this.streamingEnabled
-          ? this.chatTokenSink
-          : undefined,
+    const messagesToSend =
+      prepared.messagesToSend;
+    let outputToUse =
+      prepared.outputToUse;
+    const estimate = prepared.estimate;
 
-      tools:
-        tools.length > 0
-          ? tools
-          : undefined,
-    });
+    /*
+     * P3.6-S part 2: per-call TPM enforcement. The request already passed the
+     * context-window budget; this gate additionally protects the provider's
+     * per-minute token budget so a context-safe payload cannot die on a
+     * Groq-style 413 the moment it lands (the P3.6-S E2E failure). Deterministic:
+     * oversized => never sent (REQUEST_PAYLOAD_TOO_LARGE, non-retryable);
+     * output-dominated => output envelope clamped to fit; else fine.
+     */
+    const tpmLimit = providerTpmLimitFor(
+      provider.name,
+    );
+
+    if (tpmLimit !== undefined) {
+      const tpmDecision =
+        callModelPayloadExceedsTpm(
+          estimate,
+          outputToUse,
+          tpmLimit,
+        );
+
+      if (
+        tpmDecision.action ===
+        "abort"
+      ) {
+        console.error(
+          `[Agent] TPM preflight REJECT: ${tpmDecision.reason} (est ${tpmDecision.estimatedTokens} vs budget ${tpmDecision.budget}; limit ${tpmDecision.limit}). Not sent.`,
+        );
+
+        throw payloadTooLargeError(
+          estimate,
+          tpmDecision.limit,
+        );
+      }
+
+      if (
+        tpmDecision.action ===
+        "reduce"
+      ) {
+        console.log(
+          `[Agent] TPM preflight reduce: output envelope ${outputToUse}→${tpmDecision.messageOutputTokens} tokens to fit limit ${tpmDecision.limit}.`,
+        );
+
+        outputToUse = tpmDecision.messageOutputTokens;
+      }
+
+      /*
+       * Rolling-window TPM account: across-message protection (a long task
+       * makes several calls). When the 60s window is exhausted, park a
+       * BOUNDED wait and retry the window; still denied => the payload is
+       * not sent (never refire into an exhausted pool).
+       */
+      if (!state.tpmAccount) {
+        state.tpmAccount =
+          new TpmAccount(tpmLimit);
+      }
+
+      const chargeableTokens =
+        Math.max(
+          0,
+          estimate.totalTokensEstimated -
+            outputToUse,
+        );
+
+      const canSend =
+        state.tpmAccount.canSpend(
+          chargeableTokens,
+        );
+
+      if (!canSend.allowed) {
+        const parkMs = Math.min(
+          canSend.waitMs,
+          RETRY_MAX_WAIT_MS,
+        );
+
+        console.error(
+          `[Agent] TPM window exhausted (spent near ${tpmLimit}/min); parking ${parkMs}ms before send.`,
+        );
+
+        await sleepMs(parkMs);
+
+        const canSendNow =
+          state.tpmAccount.canSpend(
+            chargeableTokens,
+          );
+
+        if (!canSendNow.allowed) {
+          throw payloadTooLargeError(
+            estimate,
+            tpmLimit,
+          );
+        }
+      }
+    }
+
+    if (
+      estimationLogEnabled() &&
+      estimate.warnings.length > 0
+    ) {
+      console.warn(
+        `[Agent] preflight warnings: ${estimate.warnings.join(" | ")}`,
+      );
+    }
+
+    state.modelUsage.lastPreflightTokens =
+      estimate.totalTokensEstimated;
+    state.modelUsage.lastPreflightCompacted =
+      prepared.compacted;
+
+    /*
+     * P3.6-S: deterministic hierarchical budget check BEFORE the provider
+     * boundary. If the task's token/request/retry envelope is spent, the
+     * RunLoop converts TaskBudgetExhaustedError into a graceful terminal
+     * failure — never another model call into an exhausted budget.
+     */
+    state.taskBudget?.raiseIfExhausted();
+
+    /*
+     * P3.6-S: cache the preflight token split (tools / output). The
+     * retry-economics reduction ladder uses these when the next attempt is
+     * decided, so a recovery re-call is only made when it is materially
+     * smaller or an authoritative wait is available.
+     */
+    state.lastToolSchemaTokens = estimate.toolTokens;
+    state.lastOutputBudget = outputToUse;
+
+    let response: ChatResponse;
+
+    try {
+      response = await provider.chat({
+        model,
+
+        messages: messagesToSend,
+
+        temperature:
+          phase === "verify"
+            ? 0
+            : DEFAULT_TEMPERATURE,
+
+        stream: this.streamingEnabled,
+
+        contextLength,
+
+        maxOutputTokens: outputToUse,
+
+        onToken:
+          this.streamingEnabled
+            ? this.chatTokenSink
+            : undefined,
+
+        tools:
+          tools.length > 0
+            ? tools
+            : undefined,
+
+        requiredCapabilities:
+          tools.length > 0
+            ? ["toolCalling"]
+            : undefined,
+      });
+    } catch (error) {
+      // Structured attempt record for observability — the effective model may
+      // differ from the requested (auto-select / rate-limit failover), and a
+      // terminal failure must be attributable to the actual capacity tried.
+      if (error instanceof ProviderError) {
+        state.modelUsage.lastErrorCategory =
+          error.failureClass;
+        state.modelUsage.lastRetryable =
+          isRetryableProviderFailure(error);
+        state.modelUsage.lastRetryAfterMs =
+          error.retryAfterMs;
+      }
+
+      throw error;
+    }
+
+    state.modelUsage.resolvedModel =
+      response.model ?? model;
+    state.modelUsage.effectiveModel =
+      response.model ?? model;
+
+    /*
+     * P3.6-S part 2: account ACTUAL provider spend into the rolling window
+     * (real usage when reported, else the input-side estimate).
+     */
+    state.tpmAccount?.spend(
+      response.usage?.inputTokens ??
+        estimate.inputTokensEstimated,
+    );
+
+    if (
+      (state.modelUsage.effectiveModel ?? model) !==
+      model
+    ) {
+      console.log(
+        `[Agent] Effective model: ${state.modelUsage.effectiveModel} (requested ${model}, provider ${provider.name}).`,
+      );
+    }
 
     this.perf?.recordChat(
       {
@@ -2605,6 +3505,9 @@ private createInitialPlan(
 
         model,
 
+        effectiveModel:
+          response.model ?? model,
+
         contextLength,
 
         toolCount: tools.length,
@@ -2612,10 +3515,50 @@ private createInitialPlan(
         toolDefBytes:
           measureJsonBytes(tools),
       },
-      modelMessages,
+      messagesToSend,
       response,
       Date.now() - startedAt,
     );
+
+    /*
+     * P3.6-S: record the call in the hierarchical budget and the token
+     * observability tracker. Estimates come from the preflight payload
+     * estimator; actuals only when the provider returned usage (never
+     * fabricated). The tracker attaches WHY the call happened (intent) and
+     * the unique driver value for auditability.
+     */
+    state.taskBudget?.recordModelCall(
+      estimate.inputTokensEstimated,
+      outputToUse,
+      response.usage?.inputTokens,
+      response.usage?.outputTokens,
+    );
+
+    state.efficiency?.recordCall({
+      phase,
+      step: "main-loop",
+      intent:
+        this.efficiencyIntentForPhase(
+          phase,
+        ),
+      uniqueReasoningValue: `phase:${phase} | ${state.plan.intent}`,
+      model,
+      effectiveModel:
+        response.model ?? model,
+      inputTokensEstimated:
+        estimate.inputTokensEstimated,
+      outputTokensRequested:
+        outputToUse,
+      toolSchemaTokens:
+        estimate.toolTokens,
+      toolCount: tools.length,
+      contextLength,
+      latencyMs: Date.now() - startedAt,
+      actualInputTokens:
+        response.usage?.inputTokens,
+      actualOutputTokens:
+        response.usage?.outputTokens,
+    });
 
     return response;
   }
@@ -2638,9 +3581,70 @@ private createInitialPlan(
     );
   }
 
+  /*
+   * P3.6-S: maps a phase to the auditable ModelCallIntent recorded for each
+   * model call. Deterministic — the intent explains WHY the model was called.
+   */
+  private efficiencyIntentForPhase(
+    phase: AgentPhase,
+  ): ModelCallIntent {
+    switch (phase) {
+      case "understand":
+        return "understand";
+      case "inspect":
+        return "inspect";
+      case "plan":
+        return "plan";
+      case "build":
+        return "build";
+      case "execute":
+        return "execute";
+      case "test":
+        return "test";
+      case "debug":
+        return "debug";
+      case "verify":
+        return "verify";
+      case "complete":
+        return "complete";
+      case "failed":
+        return "recovery";
+    }
+  }
+
   /* ==========================================================================
    * TOOL SELECTION
    * ======================================================================== */
+
+  /*
+   * P3.6-S: Tool Selection V2 is on by default and can be disabled with
+   * MYNO_TOOL_SELECTION_V2=0 for diagnostics / golden comparisons.
+   */
+  private toolSelectionV2Enabled(): boolean {
+    return (
+      process.env.MYNO_TOOL_SELECTION_V2 !==
+      "0"
+    );
+  }
+
+  /*
+   * P3.6-S: project the plan into the V2 capability profile used to drop
+   * semantically impossible tools before the semantic/budget layers run.
+   */
+  private capabilityProfileFor(
+    plan: AgentPlan,
+  ): AgentCapabilityProfile {
+    return {
+      needsRoblox: plan.needsRoblox,
+      requiresBuild: plan.requiresBuild,
+      needsFiles: plan.needsFiles,
+      needsTerminal: plan.needsTerminal,
+      buildKind:
+        plan.needsRoblox && plan.requiresBuild
+          ? buildKindForGoal(plan.objective, plan.semanticRequest?.operation)
+          : "script",
+    };
+  }
 
   private getToolsForPhase(
     state: AgentState,
@@ -2705,46 +3709,108 @@ private createInitialPlan(
         },
       );
 
-    if (
-      state.phase === "verify"
-    ) {
-      return definitions.filter(
-        (definition) => {
-          const name =
-            definition.function.name
-              .toLowerCase();
+    /*
+     * P3.6-R: deterministic stage-aware tool selection. The full exposed set
+     * (up to ~29 tools) is never sent wholesale when the current stage needs
+     * a subset: verify/inspect only expose read-only tools, and every stage
+     * stays within MYNO_STAGE_TOOL_BUDGET (default 10000 estimated tokens)
+     * by keeping the highest-priority tools deterministically. Omission is
+     * NOT a permission grant — execution still enforces its own rules.
+     */
 
-          return (
-            !name.includes(
-              "create",
-            ) &&
-            !name.includes(
-              "delete",
-            ) &&
-            !name.includes(
-              "destroy",
-            ) &&
-            !name.includes(
-              "remove",
-            ) &&
-            !name.includes(
-              "modify",
-            ) &&
-            !name.includes(
-              "update",
-            ) &&
-            !name.includes(
-              "set_",
-            ) &&
-            !name.includes(
-              "move_",
-            ) &&
-            !name.includes(
-              "rename_",
-            )
+    const stage: ToolStage =
+      phaseToToolStage(state.phase);
+
+    /*
+     * P3.6-S part 2: when retry economics promised a materially smaller next
+     * request, shrink the stage tool budget before selection. The reduction
+     * is consumed HERE — the exposure this call builds is the promise kept.
+     */
+    const reductionScale =
+      state.reductionScale ?? 0;
+
+    let toolBudget =
+      stageToolBudgetTokens();
+
+    if (reductionScale > 0) {
+      const reducedBudget =
+        Math.floor(
+          toolBudget *
+            (1 - reductionScale),
+        );
+
+      if (
+        estimationLogEnabled()
+      ) {
+        console.log(
+          `[Agent] tool reduction active (scale ${reductionScale}): budget ${toolBudget}→${reducedBudget} tokens.`,
+        );
+      }
+
+      toolBudget = reducedBudget;
+
+      // Consumed: the next turn builds the exposure fresh.
+      state.reductionScale = undefined;
+    }
+
+    if (
+      toolBudget > 0 &&
+      definitions.length > 0
+    ) {
+      const selected =
+        selectToolsByStage(
+          definitions,
+          stage,
+          toolBudget,
+        );
+
+      /*
+       * P3.6-S: Tool Selection V2 — semantic refinement + profile excludes
+       * on top of the capability/phase layers already applied. Chain it over
+       * the stage-selected subset (never replaces the hard read-only policy)
+       * and keep the V1 result as the safe fallback if V2 yields nothing.
+       * Enabled by default; MYNO_TOOL_SELECTION_V2=0 disables it.
+       */
+      if (
+        this.toolSelectionV2Enabled() &&
+        selected.tools.length > 0
+      ) {
+        const v2 =
+          selectToolsByStageV2(
+            selected.tools,
+            stage,
+            toolBudget,
+            this.capabilityProfileFor(
+              plan,
+            ),
           );
-        },
-      );
+
+        if (
+          estimationLogEnabled() &&
+          v2.omittedNames.length > 0
+        ) {
+          console.log(
+            `[Agent] tool selection v2 (${state.phase}): exposed ${v2.selectedNames.length}, ` +
+              `semantic/budget omitted ${v2.omittedNames.length}, est ${v2.estimatedTokens} tokens (profile ${v2.semanticProfile}).`,
+          );
+        }
+
+        if (v2.tools.length > 0) {
+          return v2.tools;
+        }
+      }
+
+      if (
+        selected.omittedNames.length > 0 &&
+        estimationLogEnabled()
+      ) {
+        console.log(
+          `[Agent] tool selection (${state.phase}): exposed ${selected.selectedNames.length}, ` +
+            `omitted ${selected.omittedNames.length}, est ${selected.estimatedTokens} tokens.`,
+        );
+      }
+
+      return selected.tools;
     }
 
     return definitions;
@@ -2757,7 +3823,27 @@ private createInitialPlan(
   private async executeToolCalls(
     state: AgentState,
     toolCalls: AIToolCall[],
+    exposedTools?: AIToolDefinition[],
   ): Promise<void> {
+    /*
+     * P3.6-R exposure guard: the model may only invoke tools that were
+     * exposed in THIS turn (post stage-aware selection). Omission =
+     * not-available-this-turn, not permission — but rejecting non-exposed
+     * calls stops the model from relying on schemas the payload no longer
+     * carries, which is exactly the failure mode in the 400 rejection.
+     * Guarding only applies when a non-empty exposure was sent, so purely
+     * chat-driven turns keep full backward compatibility.
+     */
+    const exposedNames =
+      exposedTools !== undefined &&
+      exposedTools.length > 0
+        ? new Set(
+            exposedTools.map(
+              (tool) => tool.function.name,
+            ),
+          )
+        : undefined;
+
     for (
       const toolCall of toolCalls
     ) {
@@ -2815,6 +3901,44 @@ private createInitialPlan(
               success: false,
 
               error,
+            }),
+
+          toolCallId:
+            toolCall.id,
+        });
+
+        continue;
+      }
+
+      if (
+        exposedNames !== undefined &&
+        !exposedNames.has(name)
+      ) {
+        const error =
+          `Tool "${name}" was not exposed in this turn (stage-aware tool selection omits non-essential tools). ` +
+          `Do not call it again; use the exposed tools, or run a discovery/inspection tool to re-plan. ` +
+          `Use the tools available this turn: ${[...exposedNames].join(", ")}.`;
+
+        this.recordToolFailure(
+          state,
+          executionId,
+          name,
+          input,
+          error,
+          startedAt,
+        );
+
+        state.messages.push({
+          role: "tool",
+
+          content:
+            JSON.stringify({
+              success: false,
+
+              error,
+
+              blocked:
+                "tool-not-exposed",
             }),
 
           toolCallId:
@@ -2967,6 +4091,13 @@ private createInitialPlan(
        * ------------------------------------------------------------
        */
 
+      /*
+       * P3.6-S: record the real execution in the budget + observability
+       * trackers (blocked/duplicate paths above `continue` already).
+       */
+      state.efficiency?.recordToolCall();
+      state.taskBudget?.recordToolCall();
+
       const attempt =
         await this.executeWithStaleRecovery(
           state,
@@ -3021,6 +4152,41 @@ private createInitialPlan(
         result.success
       ) {
         state.consecutiveFailures = 0;
+
+        // P3.6-S part 2: any successful rlox mutation invalidates the
+        // per-iteration read cache — post-mutation observations must always
+        // come from live Studio.
+        if (
+          isRloxMutationTool(
+            name,
+          )
+        ) {
+          this.invalidateReadCache(
+            state,
+          );
+
+          // P3.6-S-CLOSE: Track mutation budget
+          state.taskBudget?.recordMutation();
+
+          // Track created/deleted instances based on tool and args
+          const executedArgs = attempt.executedInput;
+          const className = typeof executedArgs.className === "string" ? executedArgs.className : undefined;
+          const datamodelType = typeof executedArgs.datamodel_type === "string" ? executedArgs.datamodel_type : "";
+
+          if (
+            name === "roblox_create_instance" ||
+            name === "roblox_insert_instance" ||
+            (name === "roblox_multi_edit" &&
+              (datamodelType === "Create" || datamodelType === "Insert"))
+          ) {
+            state.taskBudget?.recordCreatedInstance();
+          } else if (
+            name === "roblox_delete_instance" ||
+            (name === "roblox_multi_edit" && datamodelType === "Delete")
+          ) {
+            state.taskBudget?.recordDeletedInstance();
+          }
+        }
 
         this.captureSecurityArtifacts(
           state,
@@ -3223,7 +4389,82 @@ Switch to diagnosis:
       studioIdInjected,
     );
 
-    let result =
+    /*
+     * P3.6-S part 2: PER-ITERATION READ CACHE. Identical read-only Studio
+     * inspection calls within the same iteration replay the previous result
+     * instead of hammering the MCP bridge (the live E2E wasted repeated
+     * identical listing/inspection calls). The cache never crosses an
+     * iteration boundary, is cleared by any rlox mutation, and only covers
+     * read-only tools.
+     */
+    const cacheable =
+      this.isCacheableRobloxRead(
+        state,
+        name,
+      );
+
+    let cacheKey: string | undefined;
+
+    if (cacheable) {
+      cacheKey =
+        `${name}:${this.stableStringify(
+          executedInput,
+        )}`;
+
+      if (
+        state.readCacheIteration ===
+          state.iterations &&
+        state.readCache?.has(cacheKey)
+      ) {
+        return {
+          result:
+            state.readCache.get(
+              cacheKey,
+            )!,
+          executedInput,
+          studioIdInjected,
+          staleRecoveryAttempted: false,
+          staleRecoverySucceeded: true,
+        };
+      }
+    }
+
+    /*
+     * P3.6-S part 2: DETERMINISTIC MUTATION GATE. Before any rlox mutation
+     * reaches Studio, the plan's ArtifactSpec arbitrates:
+     *   - presentation intent can never become world geometry,
+     *   - duplicate feature artifacts are blocked,
+     *   - script placement is enforced (client/server/shared), and
+     *   - read-only policy is fail-closed.
+     * The gate is stateless + testable; the model proposes, this decides.
+     */
+    if (
+      isRloxMutationTool(name) &&
+      state.plan.artifactSpec
+    ) {
+      const gateResult =
+        this.buildMutationGateResult(
+          state,
+          name,
+          executedInput,
+        );
+
+      if (!gateResult.success) {
+        console.warn(
+          `[mutation-gate] ${name}: BLOCKED — ${gateResult.error}`,
+        );
+
+        return {
+          result: gateResult,
+          executedInput,
+          studioIdInjected,
+          staleRecoveryAttempted: false,
+          staleRecoverySucceeded: false,
+        };
+      }
+    }
+
+    const executedResult =
       await this.tools.execute(
         name,
         executedInput,
@@ -3232,6 +4473,32 @@ Switch to diagnosis:
             this.sessionId,
         },
       );
+
+    if (cacheable && cacheKey) {
+      if (executedResult.success) {
+        let cache = state.readCache;
+
+        if (
+          state.readCacheIteration !==
+            state.iterations ||
+          cache === undefined
+        ) {
+          cache = new Map();
+
+          state.readCache = cache;
+
+          state.readCacheIteration =
+            state.iterations;
+        }
+
+        cache.set(
+          cacheKey,
+          executedResult,
+        );
+      }
+    }
+
+    let result = executedResult;
 
     let staleRecoveryAttempted = false;
     let staleRecoverySucceeded =
@@ -3312,6 +4579,272 @@ Switch to diagnosis:
       staleRecoveryAttempted,
       staleRecoverySucceeded,
     };
+  }
+
+  /**
+   * P3.6-S part 2: applies the deterministic MutationPlan validator to a
+   * normalized rlox mutation call. See ./agent/roblox/mutation-plan.ts.
+   * Now includes authorization policy check (LLM never final authority).
+   */
+  private buildMutationGateResult(
+    state: AgentState,
+    name: string,
+    executedInput: Record<string, unknown>,
+  ): ToolResult {
+    // Step 1: Authorization policy check (deterministic, LLM-independent)
+    const authCtx: AuthorizationContext = {
+      toolName: name,
+      args: executedInput,
+      canonicalPath: this.getCanonicalPath(executedInput),
+      className: typeof executedInput.className === "string" ? executedInput.className : undefined,
+      artifactSpec: state.plan.artifactSpec,
+      explicitReadOnly: state.plan.explicitReadOnly,
+      mutationCount: state.executedTools.filter((t) =>
+        isRloxMutationTool(t.name) && t.success
+      ).length,
+      createdInstanceCount: state.executedTools.filter((t) =>
+        t.success && isRloxMutationTool(t.name) && t.name !== "roblox_execute_luau"
+      ).length,
+      deletedInstanceCount: 0, // Not tracked yet
+      protectedTargets: state.plan.protectedTargets,
+    };
+
+    const authDecision = authorizeDestructiveAction(authCtx);
+
+    if (!authDecision.authorized) {
+      console.warn(
+        `[auth] ${name}: ${authDecision.code} — ${authDecision.reason}`,
+      );
+
+      return {
+        success: false,
+        error: `Authorization denied: ${authDecision.code} — ${authDecision.reason}`,
+      };
+    }
+
+    // Step 2: MutationPlan validation (existing)
+    const gate = validateMutationPlan({
+      toolName: name,
+      args: executedInput,
+      artifactSpec: state.plan.artifactSpec!,
+      existingFeatureArtifactPaths:
+        this.featureArtifactPathsWritten(
+          state,
+          state.plan.artifactSpec!,
+        ),
+      explicitReadOnly:
+        state.plan.explicitReadOnly,
+    });
+
+    if (gate.accepted) {
+      return {
+        success: true,
+        data: null,
+      };
+    }
+
+    return {
+      success: false,
+      error:
+        `Mutation blocked by deterministic mutation plan ` +
+        `[${gate.rejection?.code}]: ${gate.rejection?.message}`,
+    };
+  }
+
+  /**
+   * Extracts a canonical MCP path from executed tool input.
+   * Used for authorization and mutation plan checks.
+   */
+  private getCanonicalPath(
+    executedInput: Record<string, unknown>,
+  ): string | undefined {
+    for (const key of [
+      "file_path",
+      "path",
+      "parent",
+      "target_path",
+      "instance_path",
+    ]) {
+      const value = executedInput[key];
+      if (typeof value === "string" && value.trim().length > 0) {
+        return parseRobloxPath(value)?.mcpPath ?? value;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * P3.6-S part 2: paths already written (or targeted) this session that
+   * resolve to the plan's artifact — used to distinguish an in-place modify
+   * from a forbidden duplicate. Every recorded path is canonicalized first so
+   * Explorer/adapter/game forms compare equal.
+   */
+  private featureArtifactPathsWritten(
+    state: AgentState,
+    spec: ArtifactSpec,
+  ): string[] {
+    const targets: string[] = [];
+
+    for (const execution of state.executedTools) {
+      if (!execution.success) {
+        continue;
+      }
+
+      const input = execution.input as
+        | Record<string, unknown>
+        | undefined;
+
+      if (!input) {
+        continue;
+      }
+
+      for (const key of [
+        "file_path",
+        "path",
+        "parent",
+        "target_path",
+        "instance_path",
+      ]) {
+        const value = input[key];
+
+        if (typeof value !== "string") {
+          continue;
+        }
+
+        const canonical =
+          parseRobloxPath(value)?.mcpPath ??
+          value;
+
+        if (
+          canonical === spec.mcpPath ||
+          canonical === spec.displayPath
+        ) {
+          targets.push(canonical);
+        }
+      }
+    }
+
+    return targets;
+  }
+
+  /**
+   * P3.6-S part 2: a read-only, repeat-safe Roblox tool is cacheable within an
+   * iteration. Mutation tools are never cached; Studio discovery is excluded
+   * (it must always be live).
+   */
+  private isCacheableRobloxRead(
+    state: AgentState,
+    name: string,
+  ): boolean {
+    void state;
+
+    if (isRloxMutationTool(name)) {
+      return false;
+    }
+
+    if (
+      name ===
+      this.findStudioDiscoveryToolName()
+    ) {
+      return false;
+    }
+
+    const group =
+      this.tools.getGroup(name) ?? "";
+
+    return group.startsWith("roblox");
+  }
+
+  /**
+   * P3.6-S part 2: a mutation invalidates the per-iteration read cache so the
+   * model is never served a pre-mutation observation after a real change.
+   */
+  private invalidateReadCache(
+    state: AgentState,
+  ): void {
+    state.readCache = undefined;
+    state.readCacheIteration = undefined;
+  }
+
+  /**
+   * P3.6-S-CLOSE: Deterministic emergency stop / kill switch.
+   * Checks all execution limits and returns the violation if any.
+   * Returns null if all limits are within bounds.
+   */
+  private checkEmergencyStop(
+    state: AgentState,
+  ): { tripped: true; reason: string } | { tripped: false } {
+    // Check task duration - track start time in state if not present
+    if (!state.taskStartTime) {
+      state.taskStartTime = Date.now();
+    }
+    const elapsedMs = Date.now() - state.taskStartTime;
+    if (elapsedMs > DEFAULT_LIMITS.maxTaskDurationMs) {
+      return { tripped: true, reason: `Task duration ${elapsedMs}ms exceeds limit ${DEFAULT_LIMITS.maxTaskDurationMs}ms` };
+    }
+
+    // Check total tool calls
+    if (state.totalToolCalls >= DEFAULT_LIMITS.maxTotalToolCalls) {
+      return { tripped: true, reason: `Total tool calls ${state.totalToolCalls} exceeds limit ${DEFAULT_LIMITS.maxTotalToolCalls}` };
+    }
+
+    // Check iterations
+    if (state.iterations >= DEFAULT_LIMITS.maxIterations) {
+      return { tripped: true, reason: `Iterations ${state.iterations} exceeds limit ${DEFAULT_LIMITS.maxIterations}` };
+    }
+
+    // Check recovery attempts
+    if (state.recoveryAttempts >= DEFAULT_LIMITS.maxRecoveryAttempts) {
+      return { tripped: true, reason: `Recovery attempts ${state.recoveryAttempts} exceeds limit ${DEFAULT_LIMITS.maxRecoveryAttempts}` };
+    }
+
+    // Check consecutive failures
+    if (state.consecutiveFailures >= DEFAULT_LIMITS.maxConsecutiveFailures) {
+      return { tripped: true, reason: `Consecutive failures ${state.consecutiveFailures} exceeds limit ${DEFAULT_LIMITS.maxConsecutiveFailures}` };
+    }
+
+    // Check for repeated identical action (same tool + same args in last N executions)
+    const recentExecutions = state.executedTools.slice(-5);
+    if (recentExecutions.length >= 3) {
+      const last = recentExecutions[recentExecutions.length - 1];
+      const secondLast = recentExecutions[recentExecutions.length - 2];
+      const thirdLast = recentExecutions[recentExecutions.length - 3];
+      if (
+        last.name === secondLast.name &&
+        secondLast.name === thirdLast.name &&
+        JSON.stringify(last.input) === JSON.stringify(secondLast.input) &&
+        JSON.stringify(secondLast.input) === JSON.stringify(thirdLast.input)
+      ) {
+        return { tripped: true, reason: `Repeated identical tool call (${last.name}) detected 3 times consecutively` };
+      }
+    }
+
+    // Check for repeated identical failure
+    const recentFailures = state.executedTools
+      .filter((t) => !t.success)
+      .slice(-3);
+    if (recentFailures.length >= 3) {
+      const last = recentFailures[recentFailures.length - 1];
+      const secondLast = recentFailures[recentFailures.length - 2];
+      const thirdLast = recentFailures[recentFailures.length - 3];
+      if (
+        last.name === secondLast.name &&
+        secondLast.name === thirdLast.name &&
+        JSON.stringify(last.input) === JSON.stringify(secondLast.input) &&
+        JSON.stringify(secondLast.input) === JSON.stringify(thirdLast.input) &&
+        last.error === secondLast.error &&
+        secondLast.error === thirdLast.error
+      ) {
+        return { tripped: true, reason: `Repeated identical failure (${last.name}) detected 3 times consecutively` };
+      }
+    }
+
+    // Check cancellation
+    if (state.cancellationManager?.isCancelling()) {
+      return { tripped: true, reason: "Cancellation requested" };
+    }
+
+    return { tripped: false };
   }
 
   /**
@@ -3614,6 +5147,18 @@ Switch to diagnosis:
     state.verification.attempted =
       true;
 
+    // Ensure authoritative model tracking exists for the verifier path too —
+    // the verifier records effective model into the same usage record.
+    if (!state.modelUsage) {
+      state.modelUsage = {
+        requestedModel: model,
+        resolvedModel: model,
+        effectiveModel: model,
+        providerId: provider.name,
+        callCount: 0,
+      };
+    }
+
     // P3.6-D: The verifier must not reason over stale/unvalidated context.
     const verifyContextReady =
       await this.ensureActiveContext(
@@ -3632,7 +5177,7 @@ Switch to diagnosis:
       };
     }
 
-    const verificationTools =
+    const verificationToolsRaw =
       this.tools.getAIDefinitions(
         [
           "roblox-inspection",
@@ -3648,6 +5193,45 @@ Switch to diagnosis:
           compactDescriptions: true,
         },
       );
+
+    /*
+     * P3.6-R: the verifier only receives READ-ONLY tools (deterministic
+     * verify-stage selection) and a bounded set within the same token budget
+     * as the main loop. A verify pass must never mutate the workspace.
+     */
+    const stageSelected =
+      stageToolBudgetTokens() > 0
+        ? selectToolsByStage(
+            verificationToolsRaw,
+            "verify",
+            stageToolBudgetTokens(),
+          ).tools
+        : verificationToolsRaw;
+
+    /*
+     * P3.6-S: semantic refinement on top of the read-only verify selection.
+     * The verify profile is inspection-focused, so unrelated procedural/bulk
+     * schemas are dropped before the budget runs. Falls back to the stage
+     * selection when V2 omits everything.
+     */
+    const verificationTools =
+      this.toolSelectionV2Enabled() &&
+      stageSelected.length > 0
+        ? (() => {
+            const v2 =
+              selectToolsByStageV2(
+                stageSelected,
+                "verify",
+                stageToolBudgetTokens(),
+                this.capabilityProfileFor(
+                  state.plan,
+                ),
+              );
+            return v2.tools.length > 0
+              ? v2.tools
+              : stageSelected;
+          })()
+        : stageSelected;
 
     if (
       verificationTools.length === 0
@@ -3764,12 +5348,25 @@ Switch to diagnosis:
 
     const verifyStartedAt = Date.now();
 
+    // P3.6-S: the task budget also guards the verifier path.
+    state.taskBudget?.raiseIfExhausted();
+
+    // P3.6-R: same preflight/budget enforcement as the main loop. The
+    // verifier's output budget is deliberately small ("verify" stage).
+    const preparedVerify =
+      this.prepareModelCall(
+        verificationMessages,
+        verificationTools,
+        "verify",
+        contextLength,
+      );
+
     const firstResponse =
       await provider.chat({
         model,
 
         messages:
-          verificationMessages,
+          preparedVerify.messagesToSend,
 
         temperature: 0,
 
@@ -3777,9 +5374,17 @@ Switch to diagnosis:
 
         contextLength,
 
+        maxOutputTokens:
+          preparedVerify.outputToUse,
+
         tools:
           verificationTools,
       });
+
+    state.modelUsage.effectiveModel =
+      firstResponse.model ?? model;
+    state.modelUsage.resolvedModel =
+      firstResponse.model ?? model;
 
     this.perf?.recordChat(
       {
@@ -3788,6 +5393,9 @@ Switch to diagnosis:
         step: "verify",
 
         model,
+
+        effectiveModel:
+          firstResponse.model ?? model,
 
         contextLength,
 
@@ -3799,10 +5407,49 @@ Switch to diagnosis:
             verificationTools,
           ),
       },
-      verificationMessages,
+      preparedVerify.messagesToSend,
       firstResponse,
       Date.now() - verifyStartedAt,
     );
+
+    /*
+     * P3.6-S: record the verification model call in the budget + observability
+     * tracker. The verifier's intent is always "verify" and its driver value
+     * is the success-criteria digest, giving the efficiency audit full
+     * coverage of the verification path.
+     */
+    state.taskBudget?.recordModelCall(
+      preparedVerify.estimate.inputTokensEstimated,
+      preparedVerify.outputToUse,
+      firstResponse.usage?.inputTokens,
+      firstResponse.usage?.outputTokens,
+    );
+
+    state.efficiency?.recordCall({
+      phase: "verify",
+      step: "verify",
+      intent: "verify",
+      uniqueReasoningValue: `verify | ${state.plan.successCriteria.length} criteria`,
+      model,
+      effectiveModel:
+        firstResponse.model ?? model,
+      inputTokensEstimated:
+        preparedVerify.estimate
+          .inputTokensEstimated,
+      outputTokensRequested:
+        preparedVerify.outputToUse,
+      toolSchemaTokens:
+        preparedVerify.estimate.toolTokens,
+      toolCount:
+        verificationTools.length,
+      contextLength,
+      latencyMs:
+        Date.now() - verifyStartedAt,
+      actualInputTokens:
+        firstResponse.usage?.inputTokens,
+      actualOutputTokens:
+        firstResponse.usage?.outputTokens,
+    });
 
     const firstMessage =
       firstResponse.message;
@@ -3950,6 +5597,132 @@ Switch to diagnosis:
     let finalResponse =
       firstResponse;
 
+    /*
+     * P3.6-S part 2: SEMANTIC ARTIFACT VERIFICATION. When the plan resolved a
+     * dominant artifact, the LIVE inspected instances are re-checked against
+     * the artifact contract: does the authoring script exist at the exact
+     * contracted path, does its source actually create the requested behavior
+     * (L2), did the feature become illicit geometry (L3), and is there exactly
+     * one feature artifact (L4)? Structure alone is not verification — this is
+     * the semantic layer the first live E2E lacked (a Script was created in
+     * the wrong container and semantically checked nothing).
+     */
+    const artifactContract =
+      state.plan.artifactSpec
+        ? artifactContractFor(
+            state.plan.artifactSpec,
+          )
+        : null;
+
+    let semanticSatisfied = true;
+    let semanticEvidence: string[] = [];
+
+    if (artifactContract) {
+      const inspectedInstances =
+        state.executedTools
+          .filter(
+            (execution) =>
+              execution.phase ===
+                "verify" &&
+              execution.success,
+          )
+          .map((execution) => {
+            const data =
+              (execution.data ??
+                {}) as Record<
+              string,
+              unknown
+            >;
+
+            const rawPath =
+              typeof data.path ===
+              "string"
+                ? (data.path as string)
+                : undefined;
+
+            const path =
+              rawPath
+                ? normalizeInspectedPath(
+                    rawPath,
+                  ) ?? rawPath
+                : undefined;
+
+            const className =
+              typeof data.className ===
+              "string"
+                ? (data.className as string)
+                : undefined;
+
+            if (
+              !path ||
+              !className
+            ) {
+              return undefined;
+            }
+
+            const properties =
+              (data.properties ??
+                {}) as Record<
+              string,
+              unknown
+            >;
+
+            const source =
+              typeof properties.Source ===
+              "string"
+                ? (properties.Source as string)
+                : undefined;
+
+            return {
+              path,
+              className,
+              name:
+                path.split(".").pop() ??
+                path,
+              source,
+            };
+          })
+          .filter(
+            (
+              instance,
+            ): instance is {
+              path: string;
+              className: string;
+              name: string;
+              source: string | undefined;
+            } =>
+              instance !== undefined,
+          );
+
+      const semanticResult =
+        verifyInspectionAgainstContract(
+          artifactContract,
+          inspectedInstances,
+        );
+
+      semanticSatisfied =
+        semanticResult.passed;
+
+      semanticEvidence = [
+        renderSemanticVerification(
+          semanticResult,
+        ),
+      ];
+
+      evidence.push(
+        ...semanticEvidence,
+      );
+
+      if (
+        !semanticSatisfied &&
+        estimationLogEnabled()
+      ) {
+        console.warn(
+          `[verify] Semantic artifact verification FAILED for ${artifactContract.featureId}.`,
+        );
+      }
+    }
+
     if (
       calls.length > 0
     ) {
@@ -3968,9 +5741,15 @@ Switch to diagnosis:
 
           contextLength,
 
+          maxOutputTokens:
+            outputBudgetForStage("verify"),
+
           tools:
             verificationTools,
         });
+
+      state.modelUsage.effectiveModel =
+        finalResponse.model ?? model;
 
       this.perf?.recordChat(
         {
@@ -3979,6 +5758,9 @@ Switch to diagnosis:
           step: "verify",
 
           model,
+
+          effectiveModel:
+            finalResponse.model ?? model,
 
           contextLength,
 
@@ -4052,11 +5834,14 @@ Switch to diagnosis:
       !securityGate.satisfied;
 
     const gatePassed =
-      !gateUnresolved;
+      !gateUnresolved &&
+      semanticSatisfied;
 
     const reason = postBuildMissing
       ? "VERIFICATION_FAILED: A successful create/execute is not enough. Inspect Studio after the change and confirm the requested object exists."
-      : gateUnresolved
+      : !semanticSatisfied
+        ? `VERIFICATION_FAILED: semantic artifact verification did not pass for "${artifactContract?.featureId ?? "artifact"}". Inspect the live artifact, compare its source to the intended behavior, and fix before completion.`
+        : gateUnresolved
         ? `VERIFICATION_FAILED: unresolved HIGH server-authority defects (inspect the current Source and fix before completion): ${securityGate?.unresolved
             .map(
               (finding) =>
