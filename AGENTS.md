@@ -560,3 +560,226 @@ When evidence is missing, say so.
 When a design is unsafe, say so.
 When a request conflicts with the architecture, say so.
 When a gate is not passed, do not pretend it is.
+
+---
+
+## 23. Experience-Complete Building Rules
+
+MYNO's long-term target includes complete Roblox Experience creation, not
+only code generation. When a task concerns a player-facing game, agents must
+consider the applicable design, creative, gameplay, validation, and release
+layers in addition to technical implementation.
+
+The canonical transformation is:
+
+`PLAYER/OWNER INTENT → GAME DESIGN → SYSTEM DESIGN → ARCHITECTURE → CONTENT → IMPLEMENTATION → PLAYTEST → CRITIQUE → POLISH → VERIFY → RELEASE`
+
+Do not silently substitute the agent's preferred game design for the user's
+creative intent. Surface meaningful conflicts and obtain authorization when
+a creative tradeoff materially changes the requested product.
+
+---
+
+## 24. Game Design Intelligence
+
+For applicable full-game requests, reason about:
+
+- core fantasy
+- core gameplay loop
+- player motivation
+- onboarding
+- progression
+- difficulty
+- rewards
+- quests/missions
+- economy
+- social interaction
+- replayability
+- content pacing
+- session structure
+- retention risks
+- monetization
+- player clarity/friction
+
+A technically correct implementation is not evidence of a good game.
+
+---
+
+## 25. Creative / Visual / Taste Quality
+
+For player-facing output, MYNO should evaluate applicable:
+
+- composition
+- visual hierarchy
+- lighting
+- color harmony
+- material consistency
+- scale consistency
+- prop density
+- landmarks
+- navigation/readability
+- focal points
+- repetition/dead space
+- UI hierarchy
+- animation feel
+- VFX readability
+- audio feedback
+- environmental storytelling
+
+Where supported, use an iterative evidence loop:
+
+`BUILD → CAPTURE → CRITIQUE → REPAIR → RE-CAPTURE → COMPARE → POLISH`
+
+Functional does not mean finished.
+
+Applicable quality passes are:
+
+`Functional → Correct → Consistent → Readable → Polished → Immersive → Professional`
+
+---
+
+## 26. Autonomous Player / Simulation Rules
+
+The long-term autonomous validation target includes controlled synthetic
+players that can exercise a game through real inputs and observations.
+
+They may evaluate onboarding, navigation, objectives, interaction,
+progression, failure/recovery, UI clarity, rewards, social systems, economy,
+and edge cases.
+
+Synthetic-player evidence does not replace deterministic tests, real runtime
+verification, adversarial testing, or real customer/player evidence.
+
+Where useful, game/economy simulations may evaluate progression, reward
+rates, currency sinks, inflation, rarity, pricing, grind, and monetization
+pressure. Simulation is evidence/hypothesis, not a guarantee of real player
+behavior.
+
+---
+
+## 27. Content Factory Rules
+
+MYNO should eventually use reusable content primitives for:
+
+- asset families
+- building families
+- props
+- roads
+- biome variants
+- zones
+- NPC archetypes
+- quest templates
+- item families
+- UI patterns
+- VFX/audio patterns
+
+Generated content must respect project style, gameplay requirements,
+performance budgets, asset/licensing policy, deterministic placement, and
+ownership rules. Do not create uncontrolled duplication merely to increase
+content volume.
+
+---
+
+## 28. Full Lifecycle / LiveOps Rules
+
+Publishing is not the end of the engineering lifecycle.
+
+The long-term lifecycle is:
+
+`IDEA → DESIGN → PROTOTYPE → VERTICAL SLICE → PRODUCTION → CONTENT EXPANSION → QA → OPTIMIZATION → SECURITY → RELEASE CANDIDATE → PUBLISH → POST-PUBLISH VERIFY → LIVE MONITORING → LEARN → UPDATE → LIVEOPS → EVOLVE`
+
+Release operations must eventually support applicable:
+
+- versioning
+- release candidates
+- staging
+- controlled rollout
+- publish validation
+- post-publish health checks
+- compatibility/migration checks
+- incident response
+- hotfixes
+- rollback
+- emergency shutdown
+- change tracking
+
+A successful publish operation alone does not prove a healthy release.
+
+Post-release automation remains subject to authorization, policy, budgets,
+verification, audit, rollback/recovery, and emergency-stop controls.
+
+---
+
+## 29. Definition of Done
+
+Never reduce completion to a single `done` flag.
+
+Use scope-aware states:
+
+- **BUILT** — artifacts/mutations were produced.
+- **VERIFIED** — required technical/runtime evidence confirms defined behavior.
+- **POLISHED** — applicable player-facing quality criteria passed.
+- **RELEASE-CANDIDATE** — applicable engineering, security, design, QA, and release gates passed.
+- **RELEASED** — intended build was published and post-publish checks passed.
+- **SUCCESSFUL** — real-world evidence supports the intended product outcome for the relevant scope.
+- **COMPLETE** — all applicable requirements and gates are satisfied with evidence.
+
+Do not collapse these states. A plan or requirement in memory is not evidence
+that the implementation exists.
+
+---
+
+## 30. Evidence and Experience Traceability
+
+For major autonomous work, the long-term architecture should maintain an
+evidence chain:
+
+`REQUIREMENT → DESIGN → ARCHITECTURE → ARTIFACT → MUTATION → TEST → OBSERVATION → VERIFICATION → RELEASE`
+
+Evidence must be freshness/version scoped when applicable.
+
+Agents must be able to distinguish:
+
+- what is intended
+- what was built
+- what was observed
+- what was verified
+- what remains unknown
+
+Player feedback and telemetry are evidence with uncertainty, not absolute
+truth.
+
+---
+
+## 31. Creative Engineering Loop
+
+The canonical long-term loop is:
+
+`INTENT → DESIGN → ARCHITECT → BUILD → OBSERVE → PLAY → EVALUATE → CRITIQUE → IMPROVE → VERIFY → POLISH → RELEASE → MEASURE → LEARN → EVOLVE`
+
+This loop extends rather than bypasses the existing security and engineering
+pipeline.
+
+Three truths must remain distinct:
+
+- **Technical truth:** does it work?
+- **Design truth:** does it satisfy the intended design?
+- **Experience truth:** is it good enough for the intended audience?
+
+None automatically proves the others.
+
+---
+
+## 32. Final Quality Principle
+
+MYNO should optimize for genuine engineering and player-facing quality,
+not code volume, test-count theater, or impressive-looking demos.
+
+The intended outcome is a system that can eventually take a high-level
+Roblox game goal and, when the required capabilities are actually
+implemented and verified, carry it through design, world/content creation,
+systems, code, UI/UX, animation/VFX/audio, autonomous validation, security,
+performance, polish, release, and post-release evolution.
+
+This is a target architecture and operating standard, not evidence that all
+of these capabilities currently exist.
