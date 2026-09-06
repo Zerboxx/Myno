@@ -99,3 +99,54 @@ Emergency convenience is not permission for permanent superuser bypasses.
 
 ## 11. Governance Invariant
 **The owner retains ultimate governed authority, but even owner-level power should flow through secure, auditable, bounded operational mechanisms rather than invisible bypasses.**
+
+
+---
+
+## 12. Controlled Release & Feature Flag Governance
+The Admin Control Plane should eventually govern feature flags and controlled rollouts with explicit:
+- flag identity and purpose
+- scope (global, tenant, cohort, account, environment)
+- activation state
+- authorized owner
+- expiry/review date for temporary flags
+- linked release/experiment
+- rollback/disable action
+- audit history
+
+Privileged users must not use feature flags as an undocumented authorization bypass.
+
+## 13. Fraud & Financial Abuse Response Governance
+The control plane should provide governed workflows for investigating and responding to suspected:
+- promo abuse
+- credit abuse
+- duplicate entitlement
+- replay/race redemption
+- automated farming
+- refund abuse
+- chargeback abuse
+
+Responses should distinguish observation from proof and support proportionate actions such as review, temporary restriction, reversal only through authorized ledger processes, and documented appeal/recovery paths.
+
+## 14. Legal & Policy Operations
+Where product policy is implemented, the control plane should support governed visibility and version tracking for applicable:
+- terms/policy versions
+- acceptance records where required
+- retention/deletion workflows
+- account enforcement
+- dispute/refund workflows
+- jurisdiction/configuration boundaries
+
+The Admin Dashboard is an operational surface, not a substitute for qualified legal review.
+
+## 15. Project Version & Recovery Authority
+High-impact project restore, rollback, migration, or checkpoint operations should expose:
+- exact project/version target
+- scope
+- actor authorization
+- reason
+- compatibility constraints
+- confirmation/approval requirements where appropriate
+- resulting outcome evidence
+
+No privileged operator should silently overwrite a customer project without an auditable recovery boundary.
