@@ -1,83 +1,131 @@
-# Roblox AI Studio
+# MYNO — Roblox Engineering Intelligence
 
-A local AI development agent for **Roblox Studio**. Describe what you want in
-plain language (Arabic and English) and the agent plans, builds, scripts,
-and verifies it live in Roblox Studio through the Studio MCP bridge — running
-entirely on your machine against a local Ollama model.
+MYNO is being built as a **Roblox-specialized engineering intelligence platform**.
+Its target is not simply generating Luau code; it is understanding, designing,
+building, testing, debugging, optimizing, securing, verifying, polishing,
+releasing, and evolving complete Roblox experiences.
 
-## Features
+## Ultimate Target
 
-- **Full Roblox scope** — world/environment, UI, Luau scripting, NPC/AI,
-  combat, systems (economy, inventory, quests, saving), networking, debugging,
-  playtesting. One deterministic skill catalog routes any request.
-- **Live Studio integration** — inspects and edits the real place through the
-  Roblox Studio MCP plugin (auto-discovery of the active Studio session and
-  automatic stale-session recovery).
-- **Persistent project memory** — every task is summarized and stored to
-  `data/memory.json`; recall surfaces previously built artifacts and standing
-  user rules (e.g. "do exactly what I ask") into the agent's context, so
-  future sessions reuse existing content instead of duplicating it.
-- **Outcome-first engineering** — plans recognize build vs. refinement vs.
-  full redesign, keep exact user scope, and verify results in the live place.
-- **Safety by default** — server-authoritative gameplay, server-side remote
-  validation, Arabic read-only requests block destructive tooling, and
-  duplicate-artifact prevention is enforced by the skills and memory.
+The long-term target is:
 
-## Requirements
+> **100% Luau capability + 100% Roblox engineering coverage within a defined,
+> evidence-based mastery scope.**
 
-- Windows + **Roblox Studio** with the Roblox Studio MCP plugin installed
-  (see `%LOCALAPPDATA%\Roblox\mcp.bat`), or a custom launcher via
-  `ROBUX_MCP_COMMAND` / `ROBUX_MCP_ARGS`.
-- **[Ollama](https://ollama.com)** running locally with the model(s) listed in
-  `config/models.json` (pull with `ollama pull <model>` if the health check
-  reports any missing).
+This does **not** mean a literal guarantee of perfect or infinite knowledge.
+"100%" is a benchmarked engineering state: every declared mastery domain must
+have curriculum coverage, unseen challenges, regression tests, and runtime evidence
+where runtime behavior matters. Unsupported mastery claims are not accepted.
 
-## Setup
+The end-state spans:
+
+- **Luau:** semantics, strict typing, runtime behavior, concurrency, memory,
+  debugging, performance, architecture, refactoring, and API design.
+- **Roblox engineering:** Studio/DataModel, services, lifecycle, placement,
+  networking/replication, persistence, UI/UX, physics, animation, VFX/audio,
+  NPC/AI, gameplay systems, world building, level design, security, performance,
+  testing, release engineering, and LiveOps.
+- **Experience quality:** game design, player experience, visual quality,
+  simulation, autonomous playtesting, polish, and post-release evolution.
+
+## Engineering Philosophy
+
+**LLM proposes. Deterministic systems decide.**
+
+MYNO must keep authorization, Studio/tenant identity, mutation scope, security,
+budgets, verification, rollback/recovery, and final completion state outside the
+model's unchecked authority.
+
+The canonical engineering loop is:
+
+`INTENT → CLASSIFY → INSPECT → INTELLIGENCE → DECIDE → ARCHITECT → PLAN →
+AUTHORIZE → EXECUTE → OBSERVE → VERIFY → REPAIR → RE-VERIFY → REVIEW → MEMORY`
+
+For player-facing work this expands into:
+
+`INTENT → DESIGN → ARCHITECT → BUILD → PLAY → EVALUATE → CRITIQUE → IMPROVE →
+VERIFY → POLISH → RELEASE → MEASURE → LEARN → EVOLVE`
+
+## Current Roadmap
+
+`P3.6-S → P3.6-R → P3.6-RT → P3.6-CERTIFIED → P3.7 → P3.8 → P3.9 →
+P4.0 Luau + Roblox Mastery → Pre-Beta Gates → Customer Beta Ladder → Public Release Decision`
+
+### Current phase
+
+MYNO remains in **P3.6-S — Intelligence Foundation** until the defined gate is
+actually evidenced. LEI is a cross-cutting P3.6-S capability, not S.26.
+
+Current priority is to complete the intelligence foundation, then prove runtime
+reliability, red-team resilience, and certification before later execution/product
+and mastery phases are treated as active.
+
+## Intelligence Foundation
+
+P3.6-S contains S.1–S.25:
+
+- Artifact Intelligence
+- Architecture Graph
+- Placement Intelligence
+- Dependency / Communication
+- Architecture Mutation
+- Architecture Verification
+- Systems Engineering
+- Environment / Terrain
+- Asset / Spatial Construction
+- Visual Intelligence
+- Gameplay / Interaction
+- NPC / AI
+- UI / UX
+- Animation / VFX / Audio
+- Data / Persistence
+- Multiplayer / Replication
+- Performance
+- Autonomous Testing
+- Migration / Refactoring
+- Project Hygiene
+- Roblox Security Architecture
+- Design Systems
+- Project Memory / Design Intent
+- Novel / Unknown Problem Solver
+- Golden Architecture / Self-Review
+
+LEI connects the foundation to a formal Luau/Roblox knowledge, curriculum,
+evaluation, benchmark, and runtime-evidence model.
+
+## Evidence & Quality
+
+MYNO distinguishes:
+
+`Designed ≠ Implemented ≠ Verified ≠ Certified ≠ Mastered`
+
+Tests are evidence, not certification by themselves. Mastery is demonstrated by
+repeatable success on new problems with scope-specific evidence. Runtime-dependent
+claims require real Studio/runtime evidence where applicable.
+
+## Development Direction
+
+The architecture is provider-neutral and cloud-first, with replaceable model/provider
+abstractions. Roblox Studio integration is treated as a scoped, explicit runtime
+boundary rather than an implicit global session.
+
+Typical development commands are:
 
 ```bash
 npm install
-cp .env.example .env   # adjust OLLAMA_BASE_URL / ROBUX_MCP_* if needed
+npm run build
+npm run typecheck
+npm test
 ```
 
-## Usage
+See `AGENTS.md` for mandatory agent operating rules and
+`MYNO_PROJECT_MEMORY.md` for the canonical long-term architecture, roadmap,
+invariants, evidence model, and project state.
 
-```bash
-npm run dev            # start the interactive terminal agent
-```
+## Important
 
-Then type your request, e.g. `اعمل NPC يطارد اللاعب` or `create a red line
-that kills the player on touch`.
-
-CLI extras:
-
-- `memory:list` — show stored memory entries
-- `memory:search <q>` — search memory
-- `memory:clear` — wipe memory
-- `memory:on` / `memory:off` — toggle memory
-- `exit` / `quit` — stop the agent
-
-Memory file: `data/memory.json` (override with `MEMORY_FILE`; cap with
-`MEMORY_MAX_ENTRIES`, default 500).
-
-## Development
-
-```bash
-npm run dev          # dev server (tsx)
-npm run build        # compile to dist/
-npm start            # run compiled build
-npm run typecheck    # tsc --noEmit
-npm test             # node test runner over src/**/*.test.ts
-```
-
-## Project layout
-
-- `src/agent/` — Agent state machine, multilingual request planning, skill catalog
-- `src/agent/skills/` — static declarative skill catalog + deterministic selector
-- `src/memory/` — pure recall/ranking + persistent file-backed memory store
-- `src/tools/` — local tools and Roblox Studio MCP client/tools
-- `src/router/` — model router across configured Ollama models
-- `config/models.json` — model configuration
-
-## License
+Future capabilities documented here are **targets**, not proof of implementation.
+A capability is considered real only when its defined implementation and evidence
+gates have actually passed.
 
 MIT
