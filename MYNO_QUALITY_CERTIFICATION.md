@@ -82,3 +82,32 @@ Never extrapolate a local passing result into universal quality or security.
 
 ## 12. Final Principle
 **MYNO earns the right to claim quality through evidence proportional to the claim.**
+
+
+---
+
+## 13. Real Roblox Runtime / E2E Validation
+For claims involving actual Roblox behavior, the quality ladder should progress beyond static structure whenever the required environment is available:
+
+`STATIC → INTEGRATION → STUDIO/RUNTIME → INTERACTION SCENARIO → REGRESSION → ADVERSARIAL EDGE CASE`
+
+Real runtime validation should observe applicable:
+- startup/load success
+- runtime errors
+- expected artifact behavior
+- client/server behavior
+- replication/multiplayer interactions
+- player-facing flows
+- performance/resource behavior
+- repair effectiveness after failure
+
+A successful static test must never be presented as proof of a real Studio or live runtime result.
+
+## 14. Project Version Quality Boundaries
+Meaningful quality claims should identify the project/version/checkpoint they apply to. When MYNO performs substantial mutation, quality evidence should be tied to a known before/after state so regressions and restoration decisions remain explainable.
+
+## 15. Release Experiment Quality
+Feature-flagged or staged capabilities must be evaluated separately from globally released capabilities. An experiment's positive result should include measurable success criteria, failure criteria, cost impact, safety observations, and rollback conditions before broader rollout.
+
+## 16. Abuse-Resistant Quality
+Product quality includes resistance to predictable abuse. For customer-facing financial/resource systems, acceptance criteria should consider duplicate actions, replay, races, automation, invalid state transitions, and attempts to obtain value without corresponding authorization.
