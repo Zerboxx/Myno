@@ -2224,3 +2224,82 @@ UNDERSTAND
 across Roblox engineering, while protecting customer data, project integrity, system reliability, financial correctness, operational control, and the people using the platform.
 
 **LLM proposes. Deterministic systems decide. Evidence decides what MYNO is allowed to claim.**
+
+
+---
+
+# ADDITIVE EXPANSION — Controlled Product Evolution, Protection & Runtime Proof
+
+## Feature Flags & Controlled Rollouts
+MYNO's future product and infrastructure architecture should support controlled activation rather than all-or-nothing releases.
+
+Capabilities should include, where applicable:
+- tenant/account scoped flags
+- internal-only and beta cohorts
+- staged percentage rollouts
+- provider/model experiments
+- explicit compatibility/version targeting
+- instant deterministic shutdown
+- experiment observability
+- automatic/manual rollback criteria
+
+Feature flags must not become an authorization bypass or a hidden way to expose unsafe unfinished capabilities.
+
+## Legal & Business Protection
+Before broad public operation, MYNO should establish a bounded legal/business protection layer covering applicable:
+- terms of service and acceptable use
+- ownership/IP boundaries for generated work and customer inputs
+- privacy and data handling disclosures
+- retention/deletion expectations
+- credits, refunds, expirations, promotions and dispute policy
+- account suspension/termination and abuse appeals
+- payment/chargeback handling
+- third-party/provider responsibility boundaries
+
+Exact legal documents and jurisdiction-specific decisions require qualified legal review and must not be fabricated by engineering documentation.
+
+## Fraud & Financial Abuse Protection
+Customer-facing economics must assume adversarial behavior. Future financial systems should include server-authoritative controls against:
+- multi-account abuse
+- promo abuse
+- duplicate redemption
+- replay/race redemption
+- credit duplication
+- automated resource farming
+- refund abuse
+- chargeback abuse
+- anomalous consumption patterns
+
+Financial protections must integrate with authorization, idempotency, immutable/auditable ledger design, reconciliation, anomaly detection, and bounded response actions.
+
+## Project Versioning & Change Recovery
+MYNO should eventually treat meaningful customer projects as versioned engineering state.
+
+Target capabilities:
+- explicit project/version identity
+- checkpoints before high-impact mutations
+- change history and attribution
+- artifact/source diffs where supported
+- restore to a known version
+- rollback/compensation boundaries
+- compatibility and migration metadata
+- freshness-aware observations tied to version context
+
+A visual “undo” claim must not exceed what the underlying mutation/rollback evidence can actually support.
+
+## Real Roblox Runtime / E2E Validation
+Static verification is insufficient for strong runtime claims. Before broad beta, MYNO should mature a real Roblox validation ladder where environment capability permits:
+
+`BUILD → OPEN/LOAD → RUN → OBSERVE → EXERCISE INTERACTIONS → COLLECT RUNTIME EVIDENCE → DIAGNOSE → REPAIR → RE-RUN`
+
+Coverage should eventually include applicable:
+- Studio/runtime startup
+- script/runtime errors
+- client/server interaction
+- multiplayer/replication behavior
+- persistence behavior in safe environments
+- performance/resource observations
+- player-facing acceptance scenarios
+- regression of repaired failures
+
+Runtime evidence must identify environment, project/version, timestamp, scope, and limitations. Static tests cannot be relabeled as Studio/E2E evidence.
