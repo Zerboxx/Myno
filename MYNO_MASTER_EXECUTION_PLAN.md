@@ -12,7 +12,7 @@
 
 `MYNO_PROJECT_MEMORY.md` remains the canonical long-term project memory, engineering constitution, architecture, invariants, security direction, and roadmap source of truth.
 
-`AGENTS.md` remains the mandatory operating contract for agents modifying the repository.
+`AGENTS.md` remains the mandatory operating contract for agents modifying the MYNO repository.
 
 This document is the **master execution plan** that turns the broad product direction into implementation tracks, dependencies, gates, evidence requirements, and eventual certification boundaries.
 
@@ -1005,6 +1005,140 @@ Required controls include:
 - emergency access review
 - complete privileged-operation tests
 
+## H.21 Global Command Center
+
+The Admin Dashboard should provide a high-level operational command view that can summarize and control MYNO without replacing the detailed domain consoles.
+
+The command center should expose, according to operator privilege:
+
+- global system health
+- active incidents and alerts
+- active users/sessions
+- running tasks and autonomous runs
+- provider/model health
+- infrastructure capacity and degradation
+- financial/credit anomalies
+- security alerts
+- current release/rollout state
+- emergency-stop state
+- maintenance/read-only/degraded modes
+
+The command center must be an orchestration surface over authorized backend operations, not a second source of truth.
+
+## H.22 User / Tenant Operational Controls
+
+For authorized operators, the control plane should support controlled operational actions such as:
+
+- suspend / unsuspend account
+- freeze / unfreeze account or tenant
+- revoke active sessions/tokens
+- force session invalidation
+- apply or remove scoped limits
+- review and resolve risk flags
+- controlled support access where explicitly authorized
+- inspect tenant/user timelines
+
+Every action must be tenant-aware, policy-controlled, attributable, auditable, and bounded by operator role.
+
+## H.23 AI / Agent / Provider Command Controls
+
+The control plane should support operational controls over the AI execution layer, including:
+
+- pause/cancel/resume eligible tasks
+- terminate unsafe runs
+- inspect and enforce task budgets
+- inspect effective provider/model
+- disable a provider/model when compromised or unhealthy
+- adjust scoped routing/fallback policy
+- apply cooldowns or temporary provider restrictions
+- inspect tool activity and mutation activity
+- trigger approved recovery workflows
+
+No admin action should allow an operator to bypass deterministic authorization, tenant isolation, or safety policy merely for convenience.
+
+## H.24 Security Command Center
+
+Security operations should have a dedicated command view covering:
+
+- active threats
+- suspicious sessions/users/tenants
+- repeated authorization failures
+- prompt/indirect-injection signals
+- tool abuse
+- path traversal attempts
+- cross-tenant/cross-Studio attempts
+- secret exposure signals
+- resource-exhaustion attacks
+- payment/credit abuse
+- security incidents and containment state
+
+Authorized security operators should be able to perform bounded containment actions such as session revocation, tenant isolation, provider/tool disablement, or emergency execution freeze.
+
+## H.25 Forensics / Timeline / Evidence Explorer
+
+The Admin Dashboard should provide correlated timelines for users, tenants, tasks, incidents, financial events, security events, releases, and privileged operations.
+
+Forensics should connect, where appropriate:
+
+`WHO → ACTION → TARGET → AUTHORIZATION → TASK/OPERATION → PROVIDER/TOOL → OBSERVATION → RESULT → RECOVERY → AUDIT`
+
+Evidence views must preserve provenance and timestamps and must not expose secrets or unrelated customer data merely for convenience.
+
+## H.26 Recovery / Disaster Operations
+
+The control plane should expose controlled recovery capabilities such as:
+
+- service isolation
+- degraded/read-only mode
+- task draining
+- queue/worker control
+- rollback initiation
+- restore workflow initiation
+- backup/restore status
+- recovery-job monitoring
+- incident-linked recovery actions
+- post-recovery verification
+
+Recovery operations must remain bounded, auditable, and protected against stale-state and replay issues.
+
+## H.27 Privileged Command Hierarchy / Dual Control
+
+Admin privileges should be separable into roles such as:
+
+- Support Admin
+- Operations Admin
+- Finance Admin
+- Security Admin
+- Engineering Admin
+- Super Admin
+- Emergency Operator
+
+Critical operations should support stronger controls where appropriate, including:
+
+- second-operator approval / dual control
+- break-glass access
+- re-authentication
+- explicit scope and expiration
+- mandatory reason
+- enhanced audit trail
+- post-operation review
+
+The exact role names may evolve; the invariant is least privilege and controlled escalation.
+
+## H.28 Operator Decision Transparency
+
+For sensitive actions, the Admin UI should explain, before execution where practical:
+
+- why the operator is authorized
+- which policy permits the action
+- what scope will be affected
+- expected impact
+- whether rollback/recovery is available
+- whether additional approval is required
+- what will be recorded in the audit trail
+
+This is an operator-safety requirement, not permission for the UI to make authorization decisions itself.
+
 ---
 
 # 15. Track I — Production Infrastructure / SRE
@@ -1126,6 +1260,49 @@ The platform should measure actual effective model/provider usage rather than re
 During Beta, optimize for sustainable learning and margin without degrading customer value or secretly creating unusable limits.
 
 Free/cloud resources may be used where lawful and reliable, but never at the expense of security, privacy, availability, or product integrity.
+
+## J.6 Promo Codes / Campaigns
+
+The financial/admin system should support first-class promotional campaigns controlled from the Admin Dashboard.
+
+Operators should be able to create and manage promo codes with configurable:
+
+- exact code/name
+- percentage discount
+- fixed discount where applicable
+- fixed promotional credit grant
+- maximum total redemptions
+- maximum redemptions per user/tenant
+- start time
+- expiration time
+- enable/disable state
+- campaign/marketing attribution
+- eligibility/scope rules where applicable
+
+The system must support both commercial discount codes and credit-grant codes. A code should be able to represent a discount, a credit grant, or an explicitly defined combination if the business rules permit it.
+
+Promo-code redemption must be server-authoritative and protected against:
+
+- duplicate redemption
+- replay
+- race conditions
+- exceeding usage caps
+- redemption after expiration
+- unauthorized scope
+- negative/invalid financial states
+- client-side manipulation
+
+The Admin Dashboard should expose:
+
+- redemption count
+- remaining usage capacity
+- campaign performance
+- affected users/tenants through privacy-safe views
+- revenue/credit impact
+- abuse/anomaly signals
+- audit history
+
+Promo-code configuration and redemption rules must be versioned/auditable where appropriate, and financial entitlements must flow through the authoritative ledger rather than direct balance edits.
 
 ---
 
