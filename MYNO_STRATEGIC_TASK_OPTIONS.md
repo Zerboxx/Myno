@@ -116,7 +116,11 @@ COST / RESOURCE / RISK ESTIMATION
   ↓
 OPTION PRESENTATION
   ↓
-CUSTOMER SELECTS ONE
+CUSTOMER SELECTS:
+  ├─ MYNO-PROPOSED OPTION
+  └─ CUSTOMER-DEFINES / MODIFIES STRATEGY
+  ↓
+DETERMINISTIC NORMALIZATION / VALIDATION
   ↓
 CREDIT / RESOURCE RESERVATION
   ↓
@@ -201,7 +205,152 @@ The recommendation is advisory. It is not authorization and it is not the final 
 
 ---
 
-## 7. Build-vs-Reuse Decisions
+## 7. Customer-Defined / Custom Strategy Option
+
+The customer should not be forced to choose only from MYNO-generated options.
+
+For eligible decision checkpoints, the UX should provide a bounded alternative such as:
+
+**“Custom strategy / I’ll specify what I want.”**
+
+The customer may then:
+
+- describe a different strategy in natural language
+- modify a proposed strategy
+- specify different quality/speed/cost priorities
+- request a combination of characteristics from multiple proposed options
+- provide constraints or preferences that MYNO did not propose
+
+The customer-defined request is treated as a **strategy proposal**, not as direct execution authority.
+
+Conceptually:
+
+```text
+MYNO OPTIONS
+  ├─ A
+  ├─ B
+  ├─ C
+  └─ CUSTOM
+       ↓
+CUSTOMER DESCRIPTION
+       ↓
+MYNO NORMALIZES INTO MACHINE-READABLE STRATEGY
+       ↓
+DETERMINISTIC VALIDATION
+       ↓
+COST / RESOURCE / RISK ESTIMATION
+       ↓
+VALID / INVALID / REQUIRES-CLARIFICATION
+```
+
+MYNO should explain material differences between the customer's custom strategy and the original proposals when useful.
+
+If the custom strategy is materially ambiguous, unsafe, unsupported, or outside available capability, MYNO should not silently execute it. It should either:
+
+- request clarification
+- offer a bounded compatible interpretation for customer approval
+- or reject it with a clear reason
+
+The customer must always retain the ability to decline MYNO's suggestions, but declining them must **not bypass deterministic controls**.
+
+---
+
+## 8. Custom Strategy — Financial / Profit Protection
+
+The custom option must not become a mechanism for the customer to bypass MYNO's economics.
+
+Before execution, every customer-defined strategy must pass the same financial controls as MYNO-generated strategies.
+
+The flow should be:
+
+```text
+CUSTOM STRATEGY
+      ↓
+RESOURCE / COST ESTIMATION
+      ↓
+MAXIMUM DOLLAR BUDGET CHECK
+      ↓
+MAXIMUM AGENT ITERATIONS CHECK
+      ↓
+CREDIT / RESOURCE REQUIREMENT
+      ↓
+CONTRIBUTION-MARGIN CHECK
+      ↓
+DETERMINISTIC POLICY DECISION
+      ↓
+ALLOW / MODIFY / REQUIRE CUSTOMER APPROVAL / REJECT
+```
+
+MYNO must never execute a customer-defined strategy merely because the customer requested it if doing so would violate enforceable system limits.
+
+If the requested strategy is more expensive than the original proposals, MYNO should recalculate its resource and economic requirements before execution.
+
+The system may present the customer with a revised estimate such as:
+
+```text
+Your custom strategy is feasible.
+
+Estimated credits: X
+Estimated execution time: Y
+Estimated MYNO cost: Z
+
+This request differs from the recommended option because ...
+```
+
+The exact internal provider cost does not need to be exposed to the customer unless product policy chooses to expose it; however, it must remain available to the financial control plane.
+
+### Margin floor
+
+The custom strategy must respect a deterministic minimum contribution-margin / economic safety policy where applicable.
+
+If the customer's requested strategy would otherwise make the task economically unsafe, MYNO should not silently absorb the loss.
+
+It should instead apply the configured commercial policy, for example:
+
+- require additional credits/payment
+- reduce scope through an explicit customer-approved interpretation
+- offer a cheaper compatible strategy
+- pause and request customer decision
+- reject execution when no economically safe path exists
+
+The system must not manipulate the customer's requested outcome merely to protect margin without making the material change clear.
+
+### Important rule
+
+**Customer freedom of choice must not equal unlimited MYNO resource consumption.**
+
+The customer can choose what they want, but MYNO executes only a strategy that is:
+
+- technically feasible
+- authorized
+- secure
+- within resource limits
+- within credit/budget policy
+- economically acceptable under the configured commercial rules
+
+---
+
+## 9. Custom Strategy — Do Not Rebuild Everything to Compare
+
+When a customer supplies a custom strategy, MYNO should not automatically execute the custom strategy plus all generated alternatives.
+
+Default behavior remains:
+
+```text
+GENERATE / RECEIVE STRATEGIES
+        ↓
+ESTIMATE / VALIDATE
+        ↓
+CUSTOMER CHOOSES OR DEFINES ONE
+        ↓
+EXECUTE ONE
+```
+
+Comparative implementation is allowed only when explicitly authorized, bounded, and economically justified.
+
+---
+
+## 10. Build-vs-Reuse Decisions
 
 For tasks involving assets or world construction, strategic options may explicitly expose different construction strategies, for example:
 
@@ -225,7 +374,7 @@ MYNO must not treat "use an existing asset" as automatically cheaper, safer, or 
 
 ---
 
-## 8. Financial / Profit Protection
+## 11. Financial / Profit Protection
 
 Strategic options must be designed to improve customer choice **without creating uncontrolled MYNO cost**.
 
@@ -258,9 +407,11 @@ Every option must remain within deterministic spend/resource limits.
 
 The system must never intentionally present an option that is known to exceed its enforceable budget merely because the customer selected it.
 
+Customer-defined strategies are subject to these same controls; the custom path is not a pricing, credit, budget, or margin bypass.
+
 ---
 
-## 9. Reservation Semantics
+## 12. Reservation Semantics
 
 After the customer selects an option and before execution begins, MYNO should reserve the applicable resources according to the authoritative financial/budget system.
 
@@ -298,7 +449,7 @@ Financial truth remains server-authoritative.
 
 ---
 
-## 10. Critical Economic Rule — Do Not Build All Options
+## 13. Critical Economic Rule — Do Not Build All Options
 
 The normal strategic-option flow must **not** execute all 3–4 strategies and then ask the customer which one they like.
 
@@ -311,7 +462,7 @@ GENERATE 3–4 PLANS
         ↓
 ESTIMATE / VALIDATE
         ↓
-CUSTOMER SELECTS ONE
+CUSTOMER SELECTS ONE OR DEFINES ONE
         ↓
 EXECUTE ONE
 ```
@@ -320,7 +471,7 @@ Running multiple implementations may be allowed only as an explicitly authorized
 
 ---
 
-## 11. UX Requirements
+## 14. UX Requirements
 
 The customer should be able to understand the decision without reading MYNO's internal architecture.
 
@@ -341,15 +492,24 @@ The experience should support:
 - recommended option
 - compare options
 - select one
+- custom strategy / specify my own
+- modify a proposed option where supported
 - cancel decision
 - request clarification where supported
 - preserve the decision in task history
 
 No option should be represented as guaranteed if it is only an estimate.
 
+For a custom strategy, the UX should make clear that:
+
+- the customer has freedom to specify the desired outcome/approach
+- MYNO will validate feasibility and economics before execution
+- additional credits/payment or scope adjustment may be required when applicable
+- deterministic security and authorization controls still apply
+
 ---
 
-## 12. Authorization and Security
+## 15. Authorization and Security
 
 A customer selecting an option does not bypass MYNO's deterministic controls.
 
@@ -370,9 +530,11 @@ A malicious or manipulated option must not be able to grant itself elevated perm
 
 Option IDs and selected strategies should be treated as untrusted input at execution boundaries and resolved against authoritative server-side option records/contracts.
 
+Customer-defined strategy text must be treated as untrusted input as well. It must never become an execution instruction that bypasses the same authorization, capability, budget, security, or verification boundaries.
+
 ---
 
-## 13. Stale Decision Protection
+## 16. Stale Decision Protection
 
 A customer decision may become invalid if the project changes after the options were generated.
 
@@ -394,9 +556,11 @@ If not, MYNO should:
 
 Never silently execute a stale high-impact strategy against changed project state.
 
+Customer-defined strategies should receive the same stale-state and compatibility validation before execution.
+
 ---
 
-## 14. Failure / Cancellation Behavior
+## 17. Failure / Cancellation Behavior
 
 The decision checkpoint should support at minimum:
 
@@ -410,14 +574,16 @@ The decision checkpoint should support at minimum:
 - recovery failure
 - insufficient credits/resources
 - capability loss
+- custom strategy validation failure
+- custom strategy becoming economically unsafe after re-estimation
 
 Unused reservations should be reconciled according to the authoritative financial rules.
 
-The selected option must remain linked to task evidence so that the final result can be compared against the approved strategy.
+The selected option or accepted custom strategy must remain linked to task evidence so that the final result can be compared against the approved strategy.
 
 ---
 
-## 15. Observability / Evidence
+## 18. Observability / Evidence
 
 Record, where appropriate:
 
@@ -428,7 +594,7 @@ Record, where appropriate:
 - option contracts/versions
 - estimates
 - recommendation and recommendation basis
-- customer selection
+- customer selection or custom-strategy submission
 - selection timestamp
 - authorization result
 - reservation result
@@ -440,15 +606,17 @@ Record, where appropriate:
 - recovery attempts
 - final outcome
 
+For customer-defined strategies, retain the normalized strategy contract and enough provenance to show how it was derived from the customer's request without unnecessarily retaining sensitive raw content.
+
 The evidence chain should support:
 
-`REQUEST → OPTIONS → DECISION → RESERVATION → EXECUTION → OBSERVATION → VERIFICATION → OUTCOME`
+`REQUEST → OPTIONS/CUSTOM STRATEGY → DECISION → RESERVATION → EXECUTION → OBSERVATION → VERIFICATION → OUTCOME`
 
 Do not record unnecessary sensitive customer content merely to explain the decision.
 
 ---
 
-## 16. Abuse / Cost-Explosion Protection
+## 19. Abuse / Cost-Explosion Protection
 
 Strategic options themselves must not become an abuse vector.
 
@@ -463,12 +631,14 @@ Deterministic controls should bound:
 - abandoned reservations
 - repeated task replanning
 - customer-triggered expensive evaluations
+- custom-strategy submissions/regenerations
+- custom-strategy normalization/re-estimation loops
 
-A customer should not be able to force MYNO to generate unlimited strategic alternatives as a way to consume provider resources.
+A customer should not be able to force MYNO to generate unlimited strategic alternatives or repeatedly reinterpret custom strategies as a way to consume provider resources.
 
 ---
 
-## 17. Relationship to the Canonical Engineering Pipeline
+## 20. Relationship to the Canonical Engineering Pipeline
 
 Strategic decision checkpoints fit into the existing pipeline as a bounded branch after intelligence and before commitment to expensive execution:
 
@@ -516,7 +686,7 @@ The checkpoint must not become a bypass around architecture, authorization, secu
 
 ---
 
-## 18. Cross-Track Integration
+## 21. Cross-Track Integration
 
 This capability is intentionally cross-cutting.
 
@@ -525,30 +695,35 @@ This capability is intentionally cross-cutting.
 - strategic task classification
 - bounded plan generation
 - option lifecycle
+- customer-defined strategy normalization
 - selected-plan execution
 - stale-plan detection
 
 ### Financial / Business / Credits
 
 - option-level cost estimation
+- custom-strategy cost estimation
 - credit estimation
 - reservation
 - maximum dollar budget
 - maximum agent iterations
 - actual-cost reconciliation
 - contribution-margin visibility
+- commercial handling for economically unsafe custom requests
 
 ### Product / UX
 
 - option comparison
 - recommendation
 - decision checkpoint
+- custom strategy input
 - customer transparency
 - reduced rework
 
 ### Security
 
 - untrusted option handling
+- untrusted customer strategy handling
 - authorization after selection
 - budget enforcement
 - tenant/Studio binding
@@ -566,7 +741,7 @@ Where useful, preserve customer-selected strategic decisions as project intent/p
 
 ---
 
-## 19. Quality Rules
+## 22. Quality Rules
 
 MYNO should prefer:
 
@@ -578,12 +753,14 @@ MYNO should prefer:
 - customer choice for material preference decisions
 - automatic execution for routine tasks
 - evidence-backed outcomes
+- freedom for the customer to specify a materially different strategy when feasible
+- explicit handling of economic consequences instead of silently absorbing cost
 
 The system should not use choice overload as a substitute for good engineering judgment.
 
 ---
 
-## 20. Acceptance Criteria for Future Implementation
+## 23. Acceptance Criteria for Future Implementation
 
 Before this capability can be considered implemented, evidence should demonstrate at minimum:
 
@@ -593,22 +770,26 @@ Before this capability can be considered implemented, evidence should demonstrat
 4. option count is deterministically bounded
 5. options are not full implementations by default
 6. customer can select exactly one executable strategy
-7. selected strategy is revalidated before execution
-8. unselected strategies are not executed by default
-9. cost/resource estimates feed deterministic budget controls
-10. credit/resource reservation is authoritative and idempotent where applicable
-11. selected strategy remains bound to the task/evidence trail
-12. security/authorization still applies after selection
-13. stale selections are rejected or replanned safely
-14. cancellation/failure/recovery reconcile resources correctly
-15. option-generation abuse is bounded
-16. actual usage/cost can be reconciled against the selected strategy
-17. recommendation reasoning is explainable without granting the model authority
-18. runtime-sensitive claims receive target-environment evidence where applicable
+7. customer can decline MYNO-generated options and submit a custom strategy
+8. custom strategy is normalized into a bounded machine-readable contract
+9. selected/custom strategy is revalidated before execution
+10. unselected strategies are not executed by default
+11. cost/resource estimates feed deterministic budget controls
+12. credit/resource reservation is authoritative and idempotent where applicable
+13. selected/custom strategy remains bound to the task/evidence trail
+14. security/authorization still applies after selection
+15. stale selections/custom strategies are rejected or replanned safely
+16. cancellation/failure/recovery reconcile resources correctly
+17. option-generation and custom-strategy abuse is bounded
+18. actual usage/cost can be reconciled against the selected strategy
+19. recommendation reasoning is explainable without granting the model authority
+20. custom strategies cannot bypass credit, budget, security, capability, or margin controls
+21. economically unsafe custom strategies trigger the configured commercial policy rather than silent loss
+22. runtime-sensitive claims receive target-environment evidence where applicable
 
 ---
 
-## 21. Roadmap Placement
+## 24. Roadmap Placement
 
 This capability is a **planned cross-track product/agent capability**.
 
@@ -622,22 +803,24 @@ Implementation should occur only when the applicable roadmap gate authorizes the
 
 ---
 
-## 22. Final Principle
+## 25. Final Principle
 
 The purpose of Strategic Task Options is not to make MYNO ask the customer more questions.
 
-The purpose is to let MYNO handle **high-impact decisions intelligently before expensive commitment**:
+The purpose is to let MYNO handle **high-impact decisions intelligently before expensive commitment**, while still allowing the customer to define a different valid strategy:
 
 ```text
 MYNO ANALYZES
     ↓
 MYNO PROPOSES
     ↓
-DETERMINISTIC SYSTEMS BOUND THE OPTIONS
+CUSTOMER CHOOSES A PROPOSAL
+    OR
+CUSTOMER DEFINES A CUSTOM STRATEGY
     ↓
-CUSTOMER CHOOSES
+DETERMINISTIC SYSTEMS VALIDATE / BOUND / PRICE
     ↓
-MYNO EXECUTES ONE
+MYNO EXECUTES ONE APPROVED STRATEGY
     ↓
 MYNO VERIFIES
 ```
