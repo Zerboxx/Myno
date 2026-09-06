@@ -118,3 +118,40 @@ No production-readiness claim should rely only on documentation. Evidence should
 
 ## 14. Invariant
 **Operational convenience must never silently override authorization, tenant isolation, financial correctness, or evidence integrity.**
+
+
+---
+
+## 15. Controlled Rollouts & Feature Flags
+Production changes should support controlled exposure where architecture permits:
+- internal-only activation
+- allowlisted tenants/accounts
+- beta cohorts
+- percentage-based staged rollout
+- version/capability targeting
+- provider/model experiments
+- immediate scoped or global disablement
+
+Every high-impact flag should have an owner, purpose, expiry/review expectation where temporary, observability, and rollback behavior. Feature flags must not bypass authorization, financial controls, or security policy.
+
+## 16. Production Fraud & Abuse Signals
+Operational monitoring should include financial and resource-abuse indicators such as:
+- abnormal credit consumption
+- repeated promotion attempts
+- duplicate/replayed redemption
+- suspicious account/resource patterns
+- refund/chargeback anomalies
+- automated task farming
+- unusual provider-cost amplification
+
+Detection alone is not sufficient; response actions must remain authorized, bounded, auditable, and resistant to false-positive harm.
+
+## 17. Versioned Customer Project Recovery
+Production storage and execution architecture should preserve sufficient version identity and recovery metadata to support safe diagnosis and, where implemented, restoration of customer projects after failed or unsafe mutations.
+
+Backups are not automatically equivalent to per-project version history. Recovery claims must state which mechanism actually applies.
+
+## 18. Runtime / E2E Operational Evidence
+Before claiming production-grade Roblox execution confidence, collect evidence from the strongest available applicable environment. CI/static evidence, simulated integration evidence, and real Studio/runtime evidence must remain separately labeled.
+
+The operational goal is not merely “tests passed”, but reproducible evidence that the intended execution path behaved correctly under declared conditions.
