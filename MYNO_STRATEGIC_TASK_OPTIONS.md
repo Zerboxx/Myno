@@ -828,3 +828,255 @@ MYNO VERIFIES
 This preserves the core philosophy:
 
 **LLM proposes. Deterministic systems decide.**
+
+---
+
+## 26. Strategy Strength Must Produce Real, Verifiable Outcomes
+
+A stronger or more expensive strategy must **not** be a marketing label, a promise of extra effort, or simply a larger number of model/tool calls.
+
+Strategy strength must be represented by a stronger, machine-readable execution contract that defines the expected outcome and the evidence required to accept it.
+
+For each executable strategy, the contract should bind at minimum:
+
+- intended outcome
+- explicit scope and exclusions
+- required capabilities
+- quality characteristics / target tier
+- deliverables or affected artifacts
+- architecture/implementation requirements where applicable
+- performance/resource targets where applicable
+- security requirements where applicable
+- verification depth
+- acceptance criteria
+- evidence required for completion
+- recovery/repair expectations
+- economic/resource limits
+
+The strategy tier must therefore change **what success means**, not merely how much work MYNO attempts.
+
+### No false completion
+
+MYNO must never mark a selected strategy complete solely because:
+
+- the model says it is complete
+- the planned steps were executed
+- code/assets were generated
+- the task consumed its reserved credits
+- the maximum iteration count was reached
+
+Completion requires evidence against the strategy contract.
+
+Where a target is runtime-sensitive, structural evidence alone is insufficient; target-environment runtime evidence must be obtained when the applicable verification policy requires it.
+
+If verification fails, MYNO should follow the bounded recovery policy:
+
+`VERIFY → DIAGNOSE → REPAIR → RE-VERIFY`
+
+If the result still cannot satisfy the approved contract within authorized limits, MYNO must report the verified shortfall rather than silently lowering the standard.
+
+### Strategy tier example
+
+A high-end strategy may require more than a basic strategy because its contract can include stronger requirements such as:
+
+- broader functional scope
+- higher visual/UX quality targets
+- stronger modularity and maintainability
+- deeper security validation
+- stricter performance budgets
+- broader integration coverage
+- more comprehensive automated/runtime verification
+- stronger recovery expectations
+
+These are **requirements to validate**, not claims that MYNO has already achieved them.
+
+### Acceptance principle
+
+**Strategy Strength ≠ Price × Effort.**
+
+Instead:
+
+**Strategy Strength = Scope + Required Capabilities + Quality Targets + Verification Depth + Evidence Requirements + Recovery Expectations**, subject to deterministic resource and economic limits.
+
+A customer selecting the strongest option is therefore selecting a stronger **required outcome and verification standard**, not merely purchasing more attempts.
+
+---
+
+## 27. Hard Economic Safety — MYNO Must Not Intentionally Execute at a Loss
+
+The strategic-task layer must protect MYNO's contribution margin and enforce a hard economic safety boundary.
+
+The business objective is not to guarantee that every individual task can never experience an unexpected cost variance; estimates can be wrong and providers can fail. The enforceable requirement is that MYNO must **not knowingly commit to a strategy that is economically unsafe under the configured commercial policy**, and must stop, reprice, reduce scope with approval, or otherwise apply policy before avoidable loss is incurred.
+
+### Pre-execution economic gate
+
+Before any strategy is authorized, deterministic systems should calculate an expected economic envelope using the authoritative financial/control-plane data available at that time:
+
+```text
+Customer Entitlement / Revenue Value
+        −
+Expected Provider Cost
+        −
+Expected Infrastructure Cost
+        −
+Expected Tool / Execution Cost
+        −
+Expected Payment / Operational Cost
+        −
+Risk / Recovery Reserve
+        =
+Expected Contribution Margin
+```
+
+The strategy may execute only if the result satisfies the configured commercial policy, including a minimum contribution-margin / profit floor where applicable.
+
+The calculation should account for expected retries and bounded recovery work rather than pricing only the happy path.
+
+### Maximum loss / spend boundary
+
+Every executable strategy should have deterministic hard limits, as applicable:
+
+- maximum dollar budget
+- maximum agent iterations
+- maximum provider/model spend
+- maximum tool calls
+- maximum runtime
+- maximum mutation count/scope
+- maximum recovery attempts
+- maximum concurrency/resource consumption
+
+These are **enforcement boundaries**, not suggestions to the model.
+
+If actual consumption approaches a hard limit, the system must stop or transition through an explicitly authorized safe-degradation/commercial policy path. The model must not be allowed to raise its own limits.
+
+### Cost variance during execution
+
+Expected cost is not enough. The control plane should continuously reconcile actual usage against the authorized economic envelope.
+
+Conceptually:
+
+```text
+AUTHORIZED ECONOMIC ENVELOPE
+        ↓
+RUN
+        ↓
+TRACK ACTUAL COST / USAGE
+        ↓
+COMPARE AGAINST RESERVATION + LIMITS
+        ↓
+WITHIN SAFE RANGE?
+   ├─ YES → CONTINUE
+   └─ NO  → STOP / DEGRADE / REPRICE / REQUEST APPROVAL
+```
+
+A provider price change, unexpected retry/recovery cost, infrastructure spike, or materially larger-than-estimated workload must trigger re-evaluation when it can invalidate the economic assumptions.
+
+### No silent subsidy
+
+MYNO must never silently subsidize a customer-requested high-cost strategy merely to preserve the appearance of completion.
+
+If the selected strategy becomes economically unsafe, policy may require one of the following:
+
+1. consume only what remains inside the authorized safe envelope and stop safely
+2. request additional credits/payment before continuing
+3. obtain explicit customer approval for a revised commercial scope
+4. switch to a cheaper compatible strategy only with customer approval when the material outcome changes
+5. reduce scope only with explicit customer approval
+6. cancel/reject when no economically safe path exists
+
+The system must not silently downgrade the requested outcome while still representing it as the originally selected strategy.
+
+### Profit protection must not create deceptive pricing
+
+Profit protection does **not** mean hiding costs, inventing savings, or making a weaker option appear equivalent to a stronger one.
+
+Customer-facing estimates should accurately describe material scope, expected credit consumption, important limitations, and any conditions that can change the commercial requirement.
+
+Internal provider/infrastructure cost may remain private according to product policy, but the financial control plane must have authoritative access to the data needed to enforce the margin policy.
+
+### Reservation and settlement invariant
+
+For an executable task:
+
+`RESERVE → EXECUTE WITH HARD LIMITS → RECONCILE ACTUAL COST → SETTLE → RELEASE UNUSED RESERVATION`
+
+Settlement must be idempotent and server-authoritative where the underlying financial system supports it.
+
+The system must prevent negative balances, double-spend, duplicate settlement, replay, race-condition over-consumption, and retry/recovery paths that bypass the original economic envelope.
+
+### Important business invariant
+
+**A customer may choose a stronger outcome; they may not choose an unlimited MYNO loss.**
+
+The customer can request premium/high-end/custom work, but MYNO must either price and authorize it economically or decline/pause safely. It must never knowingly execute an unprofitable strategy merely because the customer selected it.
+
+---
+
+## 28. Economic Safety Does Not Override Customer Outcome Integrity
+
+Profit protection must operate without corrupting the approved task outcome.
+
+If the commercial policy cannot support the requested strategy at a safe margin, MYNO should surface the material constraint and obtain the appropriate customer decision rather than silently:
+
+- removing major features
+- lowering quality targets
+- replacing custom work with cheap reuse
+- skipping verification
+- skipping recovery
+- weakening security
+- reducing testing
+- changing architecture materially
+
+Any such material scope/quality change must be represented as a new or modified strategy contract and re-approved where policy requires it.
+
+This preserves both sides of the system:
+
+`CUSTOMER OUTCOME INTEGRITY + MYNO ECONOMIC SAFETY`
+
+Neither should be achieved by secretly violating the other.
+
+---
+
+## 29. Additional Acceptance Criteria — Outcome and Profit Safety
+
+Future implementation evidence should additionally demonstrate:
+
+23. every strategy tier has explicit outcome/quality/verification requirements rather than only a price or effort label
+24. completion cannot be declared without evidence against the selected strategy contract
+25. failed verification triggers bounded repair/re-verification or a truthful shortfall report
+26. high-end strategies have measurably stronger acceptance/verification requirements when their scope warrants it
+27. expected provider, infrastructure, tool, runtime, recovery, and operational costs are included in the economic envelope where applicable
+28. a deterministic contribution-margin/profit-floor policy is evaluated before execution
+29. maximum dollar budget and maximum agent iterations are hard enforcement limits
+30. actual cost is reconciled during/after execution against the authorized envelope
+31. economically unsafe work cannot continue merely because the customer selected the expensive option
+32. additional payment/credits or material scope changes require the appropriate commercial/customer approval path
+33. MYNO never silently downgrades a selected strategy while reporting success against the original contract
+34. retries, recovery, concurrency, provider changes, and replay cannot bypass the economic envelope
+35. no-loss-by-design claims are limited to the configured policy/enforcement boundary; unexpected external cost variance remains an operational risk to monitor rather than a fabricated guarantee
+
+---
+
+## 30. Final Economic + Quality Rule
+
+For Strategic Task Options, the strongest customer choice should mean:
+
+```text
+STRONGER CUSTOMER OUTCOME
+        +
+STRONGER EXECUTION CONTRACT
+        +
+STRONGER VERIFICATION / EVIDENCE
+        +
+APPROPRIATELY PRICED RESOURCE ENVELOPE
+        +
+HARD ECONOMIC LIMITS
+        ↓
+EXECUTE ONLY WHEN FEASIBLE + AUTHORIZED + ECONOMICALLY SAFE
+```
+
+MYNO should optimize for **successful customer outcomes and healthy contribution margin together**.
+
+It is not acceptable to maximize customer quality by knowingly making MYNO lose money, and it is not acceptable to protect margin by secretly delivering a weaker result than the customer approved.
+
+**LLM proposes. Deterministic systems decide. Financial controls enforce the economic boundary. Verification enforces the outcome boundary.**
